@@ -20,8 +20,10 @@ type State struct {
 	BreakPointsHit      uint64
 	PreviousCoverageHit uint64
 	FuzzCases           uint64
+	Crashes             uint64
 	BreakPointAddresses []uint64
 	Path                string
+	CurrentFuzzCase     string
 	Corpus              [][]byte
 	BreakPoints         map[uint64][]byte
 }
@@ -52,12 +54,13 @@ func NewState(path string, baseAddress uint64) *State {
 	return state
 }
 
-func (s *State) Spawn() int {
+func (s *State) Spawn(arg string) int {
 	path := s.Path
 	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
 	cmd := exec.Command(path)
-	cmd.Args = []string{path}
+	cmd.Args = []string{path, arg}
 	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	cmd.Stdout = devNull
 	cmd.Stderr = devNull
 	cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
@@ -110,7 +113,7 @@ func (s *State) InstrumentProcess(firstTime bool) {
 	}
 }
 
-func (s *State) ContinueExec() bool {
+func (s *State) ContinueExec() (bool, syscall.Signal) {
 	ContinueExec(s.Pid)
 	var ws syscall.WaitStatus
 	_, err := syscall.Wait4(s.Pid, &ws, syscall.WALL, nil)
@@ -119,9 +122,18 @@ func (s *State) ContinueExec() bool {
 	}
 	if ws.Exited() {
 		//fmt.Fprintf(os.Stderr, "\nDEBUG: Child Exited\n")
-		return false
+		return false, 0
 	}
-	return true
+	if ws.Signaled() {
+		fmt.Fprintf(os.Stderr, "\nDEBUG: SIGNAL")
+		panic("HANDLE SIGNALS?")
+	}
+
+	// Handle Possible CRASHES Issues Here
+	if ws.StopSignal() == syscall.SIGSEGV {
+		return true, syscall.SIGSEGV
+	}
+	return true, 0
 }
 
 func (s *State) UpdateCoverage() {
@@ -146,14 +158,23 @@ func (s *State) PrintStats() {
 	now := time.Now()
 	elapsed := now.Sub(START_TIME)
 	//fmt.Printf("INFO: Matcha Stats %s %d\n", s.Path, s.Pid)
-	fmt.Printf("INFO: Iterations %d Coverage %d/%d %2f Cases Per Second %f Seconds %f Hours %f\n", s.FuzzCases, s.BreakPointsHit, s.TotalBreakPoints, percent, float64(s.FuzzCases)/elapsed.Seconds(), elapsed.Seconds(), elapsed.Hours())
+	fmt.Printf("INFO: Crashes %d Iterations %d Coverage %d/%d %2f Cases Per Second %f Seconds %f Hours %f\n", s.Crashes, s.FuzzCases, s.BreakPointsHit, s.TotalBreakPoints, percent, float64(s.FuzzCases)/elapsed.Seconds(), elapsed.Seconds(), elapsed.Hours())
 	//fmt.Printf("INFO: Iterations %d\n", s.FuzzCases)
 
 }
 
 func (s *State) CoverageLoop() {
 	for {
-		if !s.ContinueExec() {
+		doBreak, signal := s.ContinueExec()
+		if doBreak {
+			if signal == syscall.SIGSEGV {
+				// record crash
+				fmt.Fprintf(os.Stderr, "Crash!\n")
+				s.Crashes++
+				break
+			}
+		} else {
+			// child exited
 			break
 		}
 		s.UpdateCoverage()
@@ -163,12 +184,13 @@ func (s *State) CoverageLoop() {
 var START_TIME time.Time
 
 func main() {
-	fState := NewState("./test", 0x400000)
-	fState.BreakPointAddresses = fState.GetBreakPointAddresses("./blocks.txt")
+	fState := NewState("./cli_test", 0x400000)
+	fState.BreakPointAddresses = fState.GetBreakPointAddresses("cli_blocks.txt")
+	panic("Initialize Corpus")
 	START_TIME = time.Now()
 	runtime.LockOSThread()
 	for {
-		fState.Spawn()
+		fState.Spawn("cli_test_case.txt")
 		fState.InstrumentProcess(fState.FuzzCases == 0)
 		// since were testing an example cli program we can just loop break points until exit.
 		// if it was a server we would set a permenant breakpoint at the start of the parsing of the payload
