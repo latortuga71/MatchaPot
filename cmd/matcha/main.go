@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"debug/elf"
 	"fmt"
 	"log"
 	"os"
@@ -15,38 +14,41 @@ import (
 )
 
 type State struct {
-	Pid              int
-	TotalBreakPoints uint64
-	BreakPointsHit   uint64
-	BaseAddress      uint64
-	Path             string
-	BreakPoints      map[uint64][]byte
+	Pid                 int
+	BaseAddress         uint64
+	TotalBreakPoints    uint64
+	BreakPointsHit      uint64
+	PreviousCoverageHit uint64
+	FuzzCases           uint64
+	BreakPointAddresses []uint64
+	Path                string
+	Corpus              [][]byte
+	BreakPoints         map[uint64][]byte
 }
 
-func NewState(path string) *State {
+func NewState(path string, baseAddress uint64) *State {
 	state := &State{
-		Path:        path,
-		BreakPoints: make(map[uint64][]byte),
-		BaseAddress: 0x0,
+		Path:                path,
+		BreakPoints:         make(map[uint64][]byte),
+		BaseAddress:         0x0,
+		PreviousCoverageHit: 0,
 	}
 	// Get Base Address
-	fptr, err := os.Open(path)
-	if err != nil {
-		log.Fatal(err)
-	}
-	f, err := elf.NewFile(fptr)
-	if err != nil {
-		log.Fatal(err)
-	}
-	for i := range f.Sections {
-		if f.Sections[i].Type == 1 {
-			state.BaseAddress = f.Sections[i].Addr
-			break
+	/*
+		fptr, err := os.Open(path)
+		if err != nil {
+			log.Fatal(err)
 		}
-	}
+		f, err := elf.NewFile(fptr)
+		if err != nil {
+			log.Fatal(err)
+		}
+	*/
+	state.BaseAddress = baseAddress
 	if state.BaseAddress == 0 {
 		log.Fatal("FAILED TO GET BASE ADDRESS")
 	}
+	fmt.Printf("BaseAddress 0x%x \n", state.BaseAddress)
 	return state
 }
 
@@ -55,6 +57,7 @@ func (s *State) Spawn() int {
 	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
 	cmd := exec.Command(path)
 	cmd.Args = []string{path}
+	cmd.Stdout = os.Stdout
 	cmd.Stdout = devNull
 	cmd.Stderr = devNull
 	cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
@@ -64,17 +67,18 @@ func (s *State) Spawn() int {
 	}
 	err = cmd.Wait()
 	pid := cmd.Process.Pid
-	log.Printf("Debugging Pid... %s (%d)", path, pid)
+	//log.Printf("Debugging Pid... %s (%d)", path, pid)
 	s.Pid = pid
 	return pid
 }
 
-func (s *State) InstrumentProcess(path string) {
+func (s *State) GetBreakPointAddresses(path string) []uint64 {
 	bpFile, err := os.OpenFile(path, os.O_RDONLY, 0755)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer bpFile.Close()
+	bps := make([]uint64, 0)
 	scanner := bufio.NewScanner(bpFile)
 	for scanner.Scan() {
 		text := strings.Replace(strings.TrimSuffix(scanner.Text(), "\n"), "0x", "", -1)
@@ -82,27 +86,42 @@ func (s *State) InstrumentProcess(path string) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Printf("Setting BP 0x%X\n", s.BaseAddress+offset)
+		//fmt.Fprintf(os.Stderr, "DEBUG: Setting BP 0x%X\n", s.BaseAddress+offset)
 		breakPoint := s.BaseAddress + offset
-		if breakPoint == 0x401681 {
-			log.Fatal(":er")
-		}
-		originalBytes := SetBP(s.Pid, uintptr(breakPoint))
-		s.BreakPoints[breakPoint] = originalBytes
-		s.TotalBreakPoints++
+		bps = append(bps, breakPoint)
 	}
 	if err := scanner.Err(); err != nil {
 		log.Fatal(err)
 	}
+	return bps
 }
 
-func (s *State) ContinueExec() {
+func (s *State) InstrumentProcess(firstTime bool) {
+	if firstTime {
+		for _, breakPoint := range s.BreakPointAddresses {
+			originalBytes := SetBP(s.Pid, uintptr(breakPoint))
+			s.BreakPoints[breakPoint] = originalBytes
+			s.TotalBreakPoints++
+		}
+	} else {
+		for key, _ := range s.BreakPoints {
+			SetBP(s.Pid, uintptr(key))
+		}
+	}
+}
+
+func (s *State) ContinueExec() bool {
 	ContinueExec(s.Pid)
 	var ws syscall.WaitStatus
 	_, err := syscall.Wait4(s.Pid, &ws, syscall.WALL, nil)
 	if err != nil {
 		log.Fatal("ERROR: State:::ContinueExec:::Syscall.Wait4 ", err)
 	}
+	if ws.Exited() {
+		//fmt.Fprintf(os.Stderr, "\nDEBUG: Child Exited\n")
+		return false
+	}
+	return true
 }
 
 func (s *State) UpdateCoverage() {
@@ -113,29 +132,57 @@ func (s *State) UpdateCoverage() {
 		os.Exit(-1)
 		return
 	}
-	fmt.Printf("BreakPoint PC -> 0x%x\n", pc)
+	//fmt.Printf("BreakPoint PC -> 0x%x\n", pc)
 	s.BreakPointsHit++
 	originalBytes := s.BreakPoints[pc]
 	DelBP(s.Pid, uintptr(pc), originalBytes)
 	SubRip(s.Pid)
+	// remove breakpoint from hashmap
+	delete(s.BreakPoints, pc)
+}
+
+func (s *State) PrintStats() {
+	percent := (float32(s.BreakPointsHit) / float32(s.TotalBreakPoints)) * 100.0
+	now := time.Now()
+	elapsed := now.Sub(START_TIME)
+	//fmt.Printf("INFO: Matcha Stats %s %d\n", s.Path, s.Pid)
+	fmt.Printf("INFO: Iterations %d Coverage %d/%d %2f Cases Per Second %f Seconds %f Hours %f\n", s.FuzzCases, s.BreakPointsHit, s.TotalBreakPoints, percent, float64(s.FuzzCases)/elapsed.Seconds(), elapsed.Seconds(), elapsed.Hours())
+	//fmt.Printf("INFO: Iterations %d\n", s.FuzzCases)
+
 }
 
 func (s *State) CoverageLoop() {
 	for {
-		// Continue
-		s.ContinueExec()
-		// Hit BreakPoint
+		if !s.ContinueExec() {
+			break
+		}
 		s.UpdateCoverage()
-		// Update Converage
 	}
 }
 
+var START_TIME time.Time
+
 func main() {
-	fState := NewState("./test")
+	fState := NewState("./test", 0x400000)
+	fState.BreakPointAddresses = fState.GetBreakPointAddresses("./blocks.txt")
+	START_TIME = time.Now()
 	runtime.LockOSThread()
-	fState.Spawn()
-	fState.InstrumentProcess("./blocks.txt")
-	fState.CoverageLoop()
+	for {
+		fState.Spawn()
+		fState.InstrumentProcess(fState.FuzzCases == 0)
+		// since were testing an example cli program we can just loop break points until exit.
+		// if it was a server we would set a permenant breakpoint at the start of the parsing of the payload
+		// and that would be the loop starting point so that would be a custom case
+		fState.CoverageLoop()
+		if fState.BreakPointsHit > fState.PreviousCoverageHit {
+			fState.PreviousCoverageHit = fState.BreakPointsHit
+			// Add Fuzz Case To Corpus
+		}
+		fState.FuzzCases++
+		// Query Corpus For New FuzzCase
+		// Re Run Loop
+		fState.PrintStats()
+	}
 	runtime.UnlockOSThread()
 }
 
@@ -155,7 +202,7 @@ func SetBP(pid int, address uintptr) []byte {
 func DelBP(pid int, address uintptr, originalBytes []byte) {
 	_, err := syscall.PtracePokeData(pid, address, originalBytes)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("ERROR: DelBP::PtracePokeData ", err)
 	}
 }
 
@@ -169,7 +216,7 @@ func SingleStep(pid int) {
 func ContinueExec(pid int) {
 	err := syscall.PtraceCont(pid, 0)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("ERROR: ContinueExec::PtraceCont ", err)
 	}
 }
 
@@ -177,7 +224,7 @@ func GetReg(pid int) syscall.PtraceRegs {
 	var reg syscall.PtraceRegs
 	err := syscall.PtraceGetRegs(pid, &reg)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("ERROR: GetReg ", err)
 	}
 	return reg
 }
@@ -186,7 +233,7 @@ func GetPC(pid int) uintptr {
 	var reg syscall.PtraceRegs
 	err := syscall.PtraceGetRegs(pid, &reg)
 	if err != nil {
-		log.Fatal(fmt.Sprintf("ERROR: GETPC -> %v", err))
+		log.Fatal("ERROR: GetPC ", err)
 	}
 	return uintptr(reg.PC())
 }
@@ -215,49 +262,4 @@ func SubRip(pid int) {
 	if err != nil {
 		log.Fatal(err)
 	}
-}
-
-func debuggerLoop() {
-	runtime.LockOSThread()
-	iterations := 0
-	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
-	for {
-		input := "./test"
-		cmd := exec.Command(input)
-		cmd.Args = []string{input}
-		cmd.Stdout = devNull
-		cmd.Stderr = devNull
-		cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
-		err := cmd.Start()
-		if err != nil {
-			log.Fatal(err)
-		}
-		err = cmd.Wait()
-		pid := cmd.Process.Pid
-		log.Printf("Debugging Pid... %d", pid)
-		//log.Printf("State: %v\n", err)
-		breakPointAddress := uintptr(GetPC(pid) + 0x8)
-		originalBytes := SetBP(pid, breakPointAddress)
-		ContinueExec(pid)
-		var ws syscall.WaitStatus
-		_, err = syscall.Wait4(pid, &ws, syscall.WALL, nil)
-		if err != nil {
-			log.Println("PTRACE ERROR 1")
-			log.Fatal(err)
-		}
-		DelBP(pid, breakPointAddress, originalBytes)
-		SubRip(pid)
-		ContinueExec(pid)
-		_, err = syscall.Wait4(pid, &ws, syscall.WALL, nil)
-		if err != nil {
-			log.Println("PTRACE ERROR 2")
-			log.Fatal(err)
-		}
-		//log.Printf("Exited: %v\n", ws.Exited())
-		//log.Printf("Exit status: %v\n", ws.ExitStatus())
-		log.Printf("Iterations %v\n", iterations)
-		iterations++
-		time.Sleep(time.Millisecond * 500)
-	}
-	runtime.UnlockOSThread()
 }
