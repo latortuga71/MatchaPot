@@ -1,39 +1,153 @@
 package main
 
 import (
+	"bufio"
+	"debug/elf"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
 
+type State struct {
+	Pid              int
+	TotalBreakPoints uint64
+	BreakPointsHit   uint64
+	BaseAddress      uint64
+	Path             string
+	BreakPoints      map[uint64][]byte
+}
+
+func NewState(path string) *State {
+	state := &State{
+		Path:        path,
+		BreakPoints: make(map[uint64][]byte),
+		BaseAddress: 0x0,
+	}
+	// Get Base Address
+	fptr, err := os.Open(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	f, err := elf.NewFile(fptr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for i := range f.Sections {
+		if f.Sections[i].Type == 1 {
+			state.BaseAddress = f.Sections[i].Addr
+			break
+		}
+	}
+	if state.BaseAddress == 0 {
+		log.Fatal("FAILED TO GET BASE ADDRESS")
+	}
+	return state
+}
+
+func (s *State) Spawn() int {
+	path := s.Path
+	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
+	cmd := exec.Command(path)
+	cmd.Args = []string{path}
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+	cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
+	err := cmd.Start()
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = cmd.Wait()
+	pid := cmd.Process.Pid
+	log.Printf("Debugging Pid... %s (%d)", path, pid)
+	s.Pid = pid
+	return pid
+}
+
+func (s *State) InstrumentProcess(path string) {
+	bpFile, err := os.OpenFile(path, os.O_RDONLY, 0755)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer bpFile.Close()
+	scanner := bufio.NewScanner(bpFile)
+	for scanner.Scan() {
+		text := strings.Replace(strings.TrimSuffix(scanner.Text(), "\n"), "0x", "", -1)
+		offset, err := strconv.ParseUint(text, 16, 64)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("Setting BP 0x%X\n", s.BaseAddress+offset)
+		breakPoint := s.BaseAddress + offset
+		if breakPoint == 0x401681 {
+			log.Fatal(":er")
+		}
+		originalBytes := SetBP(s.Pid, uintptr(breakPoint))
+		s.BreakPoints[breakPoint] = originalBytes
+		s.TotalBreakPoints++
+	}
+	if err := scanner.Err(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func (s *State) ContinueExec() {
+	ContinueExec(s.Pid)
+	var ws syscall.WaitStatus
+	_, err := syscall.Wait4(s.Pid, &ws, syscall.WALL, nil)
+	if err != nil {
+		log.Fatal("ERROR: State:::ContinueExec:::Syscall.Wait4 ", err)
+	}
+}
+
+func (s *State) UpdateCoverage() {
+	r := GetReg(s.Pid)
+	pc := r.PC() - 1
+	if _, ok := s.BreakPoints[pc]; !ok {
+		fmt.Printf("Not a breakpoint 0x%x\n", pc)
+		os.Exit(-1)
+		return
+	}
+	fmt.Printf("BreakPoint PC -> 0x%x\n", pc)
+	s.BreakPointsHit++
+	originalBytes := s.BreakPoints[pc]
+	DelBP(s.Pid, uintptr(pc), originalBytes)
+	SubRip(s.Pid)
+}
+
+func (s *State) CoverageLoop() {
+	for {
+		// Continue
+		s.ContinueExec()
+		// Hit BreakPoint
+		s.UpdateCoverage()
+		// Update Converage
+	}
+}
+
 func main() {
-	fmt.Println("Matcha")
-	// Spawn Process With Args
-	debuggerLoop()
-	// Insert BreakPoints At Basic Blocks
-	// Save BreakPoints, save original bytes
-	// Continue Execution
-	// If Break Remove BreakPoint From List
-	// Update Stats
-	// Callbacks on breakpoints can be used to modify buffers and fuzz
-	// so we put a breakpoint after something returns and modify the buffer for example
-	// if process exists
-	// loop but with the same breakpoint list
+	fState := NewState("./test")
+	runtime.LockOSThread()
+	fState.Spawn()
+	fState.InstrumentProcess("./blocks.txt")
+	fState.CoverageLoop()
+	runtime.UnlockOSThread()
 }
 
 func SetBP(pid int, address uintptr) []byte {
 	original := make([]byte, 1)
 	_, err := syscall.PtracePeekData(pid, address, original)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("ERROR: SetBP:::PracePeekData ", err)
 	}
 	_, err = syscall.PtracePokeData(pid, address, []byte{0xCC})
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("ERROR: SetBP:::PracePokeData ", err)
 	}
 	return original
 }
@@ -108,7 +222,7 @@ func debuggerLoop() {
 	iterations := 0
 	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
 	for {
-		input := "who"
+		input := "./test"
 		cmd := exec.Command(input)
 		cmd.Args = []string{input}
 		cmd.Stdout = devNull
