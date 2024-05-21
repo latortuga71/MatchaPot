@@ -125,7 +125,8 @@ func (s *State) Spawn(args []string) int {
 	path := s.Path
 	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
 	cmd := exec.Command(path)
-	cmd.Args = args
+	cmd.Args = []string{path}
+	cmd.Args = append(cmd.Args, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = devNull
@@ -259,8 +260,8 @@ var START_TIME time.Time
 
 func Mutate(data []byte) {
 	counter := 0
-	// Mutate 25% of the bytes
-	mutationsPerCycle := 25 * len(data) / 100
+	// Mutate 5% of the bytes
+	mutationsPerCycle := 5 * len(data) / 100
 	for {
 		randStrat := rand.Intn(5-0) + 0
 		switch randStrat {
@@ -315,8 +316,8 @@ func main() {
 		// use tmp in case
 		//argv := fmt.Sprintf("%s ./out/output.txt", fState.Corpus.GetCurrentCasePath())
 		argv := []string{fState.Corpus.GetCurrentCasePath(), "./out/output.txt"}
-		//fState.Spawn(fState.Corpus.GetCurrentCasePath())
 		fState.Spawn(argv)
+		//fState.Spawn(fState.Corpus.GetCurrentCasePath())
 		fState.InstrumentProcess(fState.FuzzCases == 0)
 		fState.CoverageLoop()
 		if fState.BreakPointsHit > fState.PreviousCoverageHit {
