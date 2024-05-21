@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"runtime"
@@ -23,9 +24,70 @@ type State struct {
 	Crashes             uint64
 	BreakPointAddresses []uint64
 	Path                string
-	CurrentFuzzCase     string
-	Corpus              [][]byte
+	CurrentFuzzCase     []byte
+	Corpus              Corpus
 	BreakPoints         map[uint64][]byte
+}
+
+type OnDiskCorpus struct {
+	CurrentFuzzCasePath   string
+	CurrentFuzzCaseDir    string
+	CurrentFuzzCaseBuffer []byte
+	CorpusCount           int
+}
+
+func NewOnDiskCorpus() *OnDiskCorpus {
+	return &OnDiskCorpus{}
+}
+
+func (c *OnDiskCorpus) InitCorpus() {
+	var err error
+	c.CorpusCount = 1
+	c.CurrentFuzzCaseDir = "./corpus"
+	c.CurrentFuzzCasePath = "./corpus/tmp.bin"
+	c.CurrentFuzzCaseBuffer, err = os.ReadFile("./corpus/1.bin")
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func (c *OnDiskCorpus) AddToCorpus(data []byte) {
+	c.CorpusCount++
+	os.WriteFile(fmt.Sprintf("./corpus/%d.bin", c.CorpusCount), data, 0644)
+}
+
+func (c *OnDiskCorpus) GetCurrentCasePath() string {
+	return c.CurrentFuzzCasePath
+}
+
+func (c *OnDiskCorpus) SetCurrentCasePath(path string) {
+	c.CurrentFuzzCasePath = path
+}
+
+func (c *OnDiskCorpus) GetRandomFuzzIndex() int {
+	return rand.Intn(c.CorpusCount-1) + 1
+}
+
+func (c *OnDiskCorpus) WriteCaseToDisk(data []byte) {
+	os.WriteFile(c.CurrentFuzzCasePath, data, 0644)
+}
+
+func (c *OnDiskCorpus) WriteCrashToDisk(crashCount int, data []byte) {
+	os.WriteFile(fmt.Sprintf("./crashes/%d", crashCount), data, 0644)
+}
+
+func (c *OnDiskCorpus) Count() int {
+	return c.CorpusCount
+}
+
+type Corpus interface {
+	InitCorpus()
+	AddToCorpus([]byte)
+	GetCurrentCasePath() string
+	WriteCaseToDisk([]byte)
+	Count() int
+	SetCurrentCasePath(string)
+	WriteCrashToDisk(int, []byte)
 }
 
 func NewState(path string, baseAddress uint64) *State {
@@ -121,7 +183,6 @@ func (s *State) ContinueExec() (bool, syscall.Signal) {
 		log.Fatal("ERROR: State:::ContinueExec:::Syscall.Wait4 ", err)
 	}
 	if ws.Exited() {
-		//fmt.Fprintf(os.Stderr, "\nDEBUG: Child Exited\n")
 		return false, 0
 	}
 	if ws.Signaled() {
@@ -168,9 +229,8 @@ func (s *State) CoverageLoop() {
 		doBreak, signal := s.ContinueExec()
 		if doBreak {
 			if signal == syscall.SIGSEGV {
-				// record crash
-				fmt.Fprintf(os.Stderr, "Crash!\n")
 				s.Crashes++
+				s.Corpus.WriteCrashToDisk(int(s.Crashes), []byte(s.CurrentFuzzCase))
 				break
 			}
 		} else {
@@ -183,26 +243,63 @@ func (s *State) CoverageLoop() {
 
 var START_TIME time.Time
 
+func Mutate(data []byte) {
+	counter := 0
+	// Mutate 5% of the bytes
+	mutationsPerCycle := 5 * len(data) / 100
+	for {
+		randStrat := rand.Intn(5-0) + 0
+		switch randStrat {
+		case 0:
+			randBit := rand.Intn((7+1)-0) + 0
+			randByte := rand.Intn((len(data))-0) + 0
+			data[randByte] ^= (1 << randBit)
+		case 1:
+			randByte := rand.Intn((len(data))-0) + 0
+			randByteFlip := rand.Intn(255-0) + 0
+			data[randByte] ^= byte(randByteFlip)
+		case 2:
+			randByte := rand.Intn((len(data))-0) + 0
+			randByteInsert := rand.Intn(255-0) + 0
+			data[randByte] = byte(randByteInsert)
+		}
+		counter++
+		if counter > mutationsPerCycle {
+			break
+		}
+	}
+}
+
 func main() {
+	rand.Seed(0x717171)
 	fState := NewState("./cli_test", 0x400000)
 	fState.BreakPointAddresses = fState.GetBreakPointAddresses("cli_blocks.txt")
-	panic("Initialize Corpus")
+	fState.Corpus = NewOnDiskCorpus()
+	fState.Corpus.InitCorpus()
 	START_TIME = time.Now()
 	runtime.LockOSThread()
 	for {
-		fState.Spawn("cli_test_case.txt")
+		// random number
+		nextCase := rand.Intn(fState.Corpus.Count()-0) + 1
+		// use rand to pick from corpus
+		caseBytes, err := os.ReadFile(fmt.Sprintf("./corpus/%d.bin", nextCase))
+		if err != nil {
+			log.Fatal(err)
+		}
+		// mutate case
+		Mutate(caseBytes)
+		fState.CurrentFuzzCase = caseBytes
+		// write to tmp which is used by the cli tool
+		fState.Corpus.WriteCaseToDisk(fState.CurrentFuzzCase)
+		// use tmp in case
+		fState.Spawn(fState.Corpus.GetCurrentCasePath())
 		fState.InstrumentProcess(fState.FuzzCases == 0)
-		// since were testing an example cli program we can just loop break points until exit.
-		// if it was a server we would set a permenant breakpoint at the start of the parsing of the payload
-		// and that would be the loop starting point so that would be a custom case
 		fState.CoverageLoop()
 		if fState.BreakPointsHit > fState.PreviousCoverageHit {
 			fState.PreviousCoverageHit = fState.BreakPointsHit
-			// Add Fuzz Case To Corpus
+			fState.Corpus.AddToCorpus(caseBytes)
 		}
 		fState.FuzzCases++
-		// Query Corpus For New FuzzCase
-		// Re Run Loop
 		fState.PrintStats()
 	}
 	runtime.UnlockOSThread()
