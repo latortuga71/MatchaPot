@@ -187,14 +187,10 @@ func (s *State) ContinueExec() (bool, syscall.Signal) {
 	if err != nil {
 		log.Fatal("ERROR: State:::ContinueExec:::Syscall.Wait4 ", err)
 	}
-	if ws.Exited() {
-		return false, 0
-	}
 	if ws.Signaled() {
 		fmt.Fprintf(os.Stderr, "\nDEBUG: SIGNAL")
 		panic("HANDLE SIGNALS?")
 	}
-
 	// Handle Possible CRASHES Issues Here
 	if ws.StopSignal() == syscall.SIGSEGV {
 		return true, syscall.SIGSEGV
@@ -205,7 +201,15 @@ func (s *State) ContinueExec() (bool, syscall.Signal) {
 	if ws.StopSignal() == syscall.SIGBUS {
 		return true, syscall.SIGSEGV
 	}
-	return true, 0
+	if ws.StopSignal() == syscall.SIGTRAP {
+		// a breakpoint
+		return true, 0
+	}
+	if ws.Exited() {
+		return false, 0
+	}
+	log.Fatalf("UNKNOWN SIGNAL %d", ws.StopSignal())
+	return false, 0
 }
 
 func (s *State) UpdateCoverage() {
