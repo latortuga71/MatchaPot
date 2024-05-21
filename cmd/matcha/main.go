@@ -121,11 +121,11 @@ func NewState(path string, baseAddress uint64) *State {
 	return state
 }
 
-func (s *State) Spawn(arg string) int {
+func (s *State) Spawn(args []string) int {
 	path := s.Path
 	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
 	cmd := exec.Command(path)
-	cmd.Args = []string{path, arg}
+	cmd.Args = args
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = devNull
@@ -255,15 +255,15 @@ var START_TIME time.Time
 
 func Mutate(data []byte) {
 	counter := 0
-	// Mutate 5% of the bytes
-	mutationsPerCycle := 5 * len(data) / 100
+	// Mutate 25% of the bytes
+	mutationsPerCycle := 25 * len(data) / 100
 	for {
 		randStrat := rand.Intn(5-0) + 0
 		switch randStrat {
 		case 0:
-			randBit := rand.Intn((7+1)-0) + 0
+			randBitFlip := rand.Intn((7+1)-0) + 0
 			randByte := rand.Intn((len(data))-0) + 0
-			data[randByte] ^= (1 << randBit)
+			data[randByte] ^= (1 << randBitFlip)
 		case 1:
 			randByte := rand.Intn((len(data))-0) + 0
 			randByteFlip := rand.Intn(255-0) + 0
@@ -272,6 +272,13 @@ func Mutate(data []byte) {
 			randByte := rand.Intn((len(data))-0) + 0
 			randByteInsert := rand.Intn(255-0) + 0
 			data[randByte] = byte(randByteInsert)
+		case 3:
+			randByte := rand.Intn((len(data))-0) + 0
+			data[randByte] = 0x0
+		case 4:
+			randByte := rand.Intn((len(data))-0) + 0
+			data[randByte] = 0xFF
+		default:
 		}
 		counter++
 		if counter > mutationsPerCycle {
@@ -282,8 +289,8 @@ func Mutate(data []byte) {
 
 func main() {
 	rand.Seed(0x717171)
-	fState := NewState("./pdfinfo", 0x400000)
-	fState.BreakPointAddresses = fState.GetBreakPointAddresses("pdf_blocks.txt")
+	fState := NewState("./pdftotext", 0x400000)
+	fState.BreakPointAddresses = fState.GetBreakPointAddresses("pdftotext_blocks.txt")
 	fState.Corpus = NewOnDiskCorpus()
 	fState.Corpus.InitCorpus()
 	START_TIME = time.Now()
@@ -302,7 +309,10 @@ func main() {
 		// write to tmp which is used by the cli tool
 		fState.Corpus.WriteCaseToDisk(fState.CurrentFuzzCase)
 		// use tmp in case
-		fState.Spawn(fState.Corpus.GetCurrentCasePath())
+		//argv := fmt.Sprintf("%s ./out/output.txt", fState.Corpus.GetCurrentCasePath())
+		argv := []string{fState.Corpus.GetCurrentCasePath(), "./out/output.txt"}
+		//fState.Spawn(fState.Corpus.GetCurrentCasePath())
+		fState.Spawn(argv)
 		fState.InstrumentProcess(fState.FuzzCases == 0)
 		fState.CoverageLoop()
 		if fState.BreakPointsHit > fState.PreviousCoverageHit {
