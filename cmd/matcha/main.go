@@ -199,6 +199,12 @@ func (s *State) ContinueExec() (bool, syscall.Signal) {
 	if ws.StopSignal() == syscall.SIGSEGV {
 		return true, syscall.SIGSEGV
 	}
+	if ws.StopSignal() == syscall.SIGABRT {
+		return true, syscall.SIGSEGV
+	}
+	if ws.StopSignal() == syscall.SIGBUS {
+		return true, syscall.SIGSEGV
+	}
 	return true, 0
 }
 
@@ -207,7 +213,6 @@ func (s *State) UpdateCoverage() {
 	pc := r.PC() - 1
 	if _, ok := s.BreakPoints[pc]; !ok {
 		fmt.Printf("Not a breakpoint 0x%x\n", pc)
-		os.Exit(-1)
 		return
 	}
 	//fmt.Printf("BreakPoint PC -> 0x%x\n", pc)
@@ -277,8 +282,8 @@ func Mutate(data []byte) {
 
 func main() {
 	rand.Seed(0x717171)
-	fState := NewState("./cli_test", 0x400000)
-	fState.BreakPointAddresses = fState.GetBreakPointAddresses("cli_blocks.txt")
+	fState := NewState("./pdfinfo", 0x400000)
+	fState.BreakPointAddresses = fState.GetBreakPointAddresses("pdf_blocks.txt")
 	fState.Corpus = NewOnDiskCorpus()
 	fState.Corpus.InitCorpus()
 	START_TIME = time.Now()
