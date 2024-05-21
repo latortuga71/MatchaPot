@@ -42,7 +42,12 @@ func NewOnDiskCorpus() *OnDiskCorpus {
 
 func (c *OnDiskCorpus) InitCorpus() {
 	var err error
-	c.CorpusCount = 1
+	// get all files in the corpus dir this will be our corpus starting count
+	entry, err := os.ReadDir("./corpus")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c.CorpusCount = len(entry) - 1
 	c.CurrentFuzzCaseDir = "./corpus"
 	c.CurrentFuzzCasePath = "./corpus/tmp.bin"
 	c.CurrentFuzzCaseBuffer, err = os.ReadFile("./corpus/1.bin")
