@@ -42,7 +42,6 @@ func NewOnDiskCorpus() *OnDiskCorpus {
 
 func (c *OnDiskCorpus) InitCorpus() {
 	var err error
-	// get all files in the corpus dir this will be our corpus starting count
 	entry, err := os.ReadDir("./corpus")
 	if err != nil {
 		log.Fatal(err)
@@ -102,17 +101,6 @@ func NewState(path string, baseAddress uint64) *State {
 		BaseAddress:         0x0,
 		PreviousCoverageHit: 0,
 	}
-	// Get Base Address
-	/*
-		fptr, err := os.Open(path)
-		if err != nil {
-			log.Fatal(err)
-		}
-		f, err := elf.NewFile(fptr)
-		if err != nil {
-			log.Fatal(err)
-		}
-	*/
 	state.BaseAddress = baseAddress
 	if state.BaseAddress == 0 {
 		log.Fatal("FAILED TO GET BASE ADDRESS")
@@ -294,12 +282,20 @@ func Mutate(data []byte) {
 
 func main() {
 	rand.Seed(0x717171)
-	fState := NewState("./pdftotext", 0x400000)
-	fState.BreakPointAddresses = fState.GetBreakPointAddresses("pdftotext_blocks.txt")
+	fState := NewState("./cli_test", 0x400000)
+	fState.BreakPointAddresses = fState.GetBreakPointAddresses("cli_blocks.txt")
 	fState.Corpus = NewOnDiskCorpus()
 	fState.Corpus.InitCorpus()
 	START_TIME = time.Now()
 	runtime.LockOSThread()
+	// Set BreakPoint At Main
+	// Hit Main BreakPoint
+	// Save Snapshot
+	// Set BreakPoint Before Main Exit
+	// 0. Run With Case <- actual loop
+	// 1. Hit Exit Breakpoint
+	// 2. Restore
+	// 3. Go Back to 0
 	for {
 		// random number
 		nextCase := rand.Intn(fState.Corpus.Count()-0) + 1
