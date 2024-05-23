@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"matcha/internal/snapshot"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -15,18 +16,23 @@ import (
 )
 
 type State struct {
-	Pid                 int
-	BaseAddress         uint64
-	TotalBreakPoints    uint64
-	BreakPointsHit      uint64
-	PreviousCoverageHit uint64
-	FuzzCases           uint64
-	Crashes             uint64
-	BreakPointAddresses []uint64
-	Path                string
-	CurrentFuzzCase     []byte
-	Corpus              Corpus
-	BreakPoints         map[uint64][]byte
+	Pid                  int
+	BaseAddress          uint64
+	TotalBreakPoints     uint64
+	BreakPointsHit       uint64
+	PreviousCoverageHit  uint64
+	FuzzCases            uint64
+	Crashes              uint64
+	SnapshotAddress      uint64
+	SnapshotAddressBytes []byte
+	RestoreAddressBytes  []byte
+	RestoreAddress       uint64
+	SnapshotData         snapshot.Snapshot
+	BreakPointAddresses  []uint64
+	Path                 string
+	CurrentFuzzCase      []byte
+	Corpus               Corpus
+	BreakPoints          map[uint64][]byte
 }
 
 type OnDiskCorpus struct {
@@ -94,12 +100,14 @@ type Corpus interface {
 	WriteCrashToDisk(int, []byte)
 }
 
-func NewState(path string, baseAddress uint64) *State {
+func NewState(path string, baseAddress uint64, snapshotAddress uint64, restoreAddress uint64) *State {
 	state := &State{
 		Path:                path,
 		BreakPoints:         make(map[uint64][]byte),
 		BaseAddress:         0x0,
 		PreviousCoverageHit: 0,
+		SnapshotAddress:     snapshotAddress,
+		RestoreAddress:      restoreAddress,
 	}
 	state.BaseAddress = baseAddress
 	if state.BaseAddress == 0 {
@@ -111,14 +119,14 @@ func NewState(path string, baseAddress uint64) *State {
 
 func (s *State) Spawn(args []string) int {
 	path := s.Path
-	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
+	//devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
 	cmd := exec.Command(path)
 	cmd.Args = []string{path}
 	cmd.Args = append(cmd.Args, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Stdout = devNull
-	cmd.Stderr = devNull
+	//cmd.Stdout = devNull
+	//cmd.Stderr = devNull
 	cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
 	err := cmd.Start()
 	if err != nil {
@@ -182,17 +190,20 @@ func (s *State) ContinueExec() (bool, syscall.Signal) {
 	}
 	// Handle Possible CRASHES Issues Here
 	if ws.StopSignal() == syscall.SIGSEGV {
+		panic("SEGFAULT")
 		return true, syscall.SIGSEGV
 	}
 	if ws.StopSignal() == syscall.SIGABRT {
+		panic("SEGABORT")
 		return true, syscall.SIGSEGV
 	}
 	if ws.StopSignal() == syscall.SIGBUS {
-		return true, syscall.SIGSEGV
+		panic("SEGBUS")
+		return true, syscall.SIGBUS
 	}
 	if ws.StopSignal() == syscall.SIGTRAP {
 		// a breakpoint
-		return true, 0
+		return false, syscall.SIGTRAP
 	}
 	if ws.Exited() {
 		return false, 0
@@ -201,12 +212,14 @@ func (s *State) ContinueExec() (bool, syscall.Signal) {
 	return false, 0
 }
 
-func (s *State) UpdateCoverage() {
+func (s *State) UpdateCoverage() bool {
 	r := GetReg(s.Pid)
 	pc := r.PC() - 1
+	if s.RestoreAddress == pc {
+		return true
+	}
 	if _, ok := s.BreakPoints[pc]; !ok {
-		fmt.Printf("Not a breakpoint 0x%x\n", pc)
-		return
+		log.Fatalf("Not a breakpoint 0x%x\n", pc)
 	}
 	//fmt.Printf("BreakPoint PC -> 0x%x\n", pc)
 	s.BreakPointsHit++
@@ -215,6 +228,8 @@ func (s *State) UpdateCoverage() {
 	SubRip(s.Pid)
 	// remove breakpoint from hashmap
 	delete(s.BreakPoints, pc)
+	fmt.Println("bp removed")
+	return false
 }
 
 func (s *State) PrintStats() {
@@ -224,7 +239,34 @@ func (s *State) PrintStats() {
 	//fmt.Printf("INFO: Matcha Stats %s %d\n", s.Path, s.Pid)
 	fmt.Printf("INFO: Crashes %d Iterations %d Coverage %d/%d %2f Cases Per Second %f Seconds %f Hours %f\n", s.Crashes, s.FuzzCases, s.BreakPointsHit, s.TotalBreakPoints, percent, float64(s.FuzzCases)/elapsed.Seconds(), elapsed.Seconds(), elapsed.Hours())
 	//fmt.Printf("INFO: Iterations %d\n", s.FuzzCases)
+}
 
+func (s *State) RestoreSnapshot() {
+	SetReg(s.Pid, s.SnapshotData.Registers)
+	for i := range s.SnapshotData.Memory {
+		snapshot.WriteRegionToProcess(s.Pid, s.SnapshotData.Memory[i])
+	}
+}
+
+func (s *State) TakeSnapshot() {
+	fmt.Println("Taking Child Snapshot")
+	s.SnapshotAddressBytes = SetBP(s.Pid, uintptr(s.SnapshotAddress))
+	s.RestoreAddressBytes = SetBP(s.Pid, uintptr(s.RestoreAddress))
+	// Run Until We Hit Above Snapshot BreakPoint
+	s.ContinueExec()
+	r := GetReg(s.Pid)
+	pc := r.PC() - 1
+	if pc != s.SnapshotAddress {
+		log.Panicf("ERROR: Wrong breakpoint wanted 0x%x got 0x%x", s.SnapshotAddress, pc)
+	}
+	DelBP(s.Pid, uintptr(pc), s.SnapshotAddressBytes)
+	SubRip(s.Pid)
+	// Set BreakPoints for the whole process now to get coverage
+	fmt.Println("Instrumenting Child")
+	s.InstrumentProcess(true)
+	// SnapShot The Memory And Registers So We Restore To This Location
+	s.SnapshotData = snapshot.NewSnapshot(s.Pid)
+	fmt.Println("Snapshot Complete")
 }
 
 func (s *State) CoverageLoop() {
@@ -241,6 +283,36 @@ func (s *State) CoverageLoop() {
 			break
 		}
 		s.UpdateCoverage()
+	}
+}
+
+func (s *State) RestoreLoop() bool {
+	for {
+		ContinueExec(s.Pid)
+		var ws syscall.WaitStatus
+		_, err := syscall.Wait4(s.Pid, &ws, syscall.WALL, nil)
+		if err != nil {
+			log.Fatal("ERROR: State:::ContinueExec:::Syscall.Wait4 ", err)
+		}
+		if ws.Signaled() {
+			fmt.Fprintf(os.Stderr, "\nDEBUG: SIGNAL")
+			panic("HANDLE SIGNALS?")
+		}
+		switch ws.StopSignal() {
+		case syscall.SIGSEGV:
+			panic("SEGFAULT")
+		case syscall.SIGTRAP:
+			return s.UpdateCoverage()
+		case syscall.SIGABRT:
+			panic("SIGRABORT")
+		case syscall.SIGBUS:
+			panic("SIGBUS")
+		default:
+			if ws.Exited() {
+				panic("child exited")
+			}
+			log.Fatalf("UNKNOWN SIGNAL %d", ws.StopSignal())
+		}
 	}
 }
 
@@ -282,47 +354,65 @@ func Mutate(data []byte) {
 
 func main() {
 	rand.Seed(0x717171)
-	fState := NewState("./cli_test", 0x400000)
+	// 0x40128C right after fread returns
+	//
+	fState := NewState("./cli_test", 0x400000, 0x4012B0, 0x401398)
 	fState.BreakPointAddresses = fState.GetBreakPointAddresses("cli_blocks.txt")
 	fState.Corpus = NewOnDiskCorpus()
 	fState.Corpus.InitCorpus()
 	START_TIME = time.Now()
 	runtime.LockOSThread()
-	// Set BreakPoint At Main
-	// Hit Main BreakPoint
-	// Save Snapshot
-	// Set BreakPoint Before Main Exit
-	// 0. Run With Case <- actual loop
-	// 1. Hit Exit Breakpoint
-	// 2. Restore
-	// 3. Go Back to 0
+	fState.Spawn([]string{"./egg_payload.txt"})
+	fState.TakeSnapshot()
+	// Find Which Region Has Egg
+	// Read Egg In Memory To CurrentFuzzCaseBuffer
+	// DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF
+	// Only Modify That Region To Make It Easier
 	for {
-		// random number
-		nextCase := rand.Intn(fState.Corpus.Count()-0) + 1
-		// use rand to pick from corpus
-		caseBytes, err := os.ReadFile(fmt.Sprintf("./corpus/%d.bin", nextCase))
-		if err != nil {
-			log.Fatal(err)
+		// Mutate Current Fuzz Case Buffer
+		// Write It Back To Memory Memory
+		// Continue Execution
+		if fState.RestoreLoop() {
+			fState.RestoreSnapshot()
+			fState.FuzzCases++
+			fState.PrintStats()
 		}
-		// mutate case
-		Mutate(caseBytes)
-		fState.CurrentFuzzCase = caseBytes
-		// write to tmp which is used by the cli tool
-		fState.Corpus.WriteCaseToDisk(fState.CurrentFuzzCase)
-		// use tmp in case
-		//argv := fmt.Sprintf("%s ./out/output.txt", fState.Corpus.GetCurrentCasePath())
-		argv := []string{fState.Corpus.GetCurrentCasePath(), "./out/output.txt"}
-		fState.Spawn(argv)
-		//fState.Spawn(fState.Corpus.GetCurrentCasePath())
-		fState.InstrumentProcess(fState.FuzzCases == 0)
-		fState.CoverageLoop()
+		// Check if we got more coverage
+		// If we did add to in memory corpus
 		if fState.BreakPointsHit > fState.PreviousCoverageHit {
 			fState.PreviousCoverageHit = fState.BreakPointsHit
-			fState.Corpus.AddToCorpus(caseBytes)
+			//fState.Corpus.AddToCorpus(caseBytes)
 		}
-		fState.FuzzCases++
-		fState.PrintStats()
 	}
+	/*
+		for {
+				// random number
+				nextCase := rand.Intn(fState.Corpus.Count()-0) + 1
+				// use rand to pick from corpus
+				caseBytes, err := os.ReadFile(fmt.Sprintf("./corpus/%d.bin", nextCase))
+				if err != nil {
+					log.Fatal(err)
+				}
+				// mutate case
+				Mutate(caseBytes)
+				fState.CurrentFuzzCase = caseBytes
+				// write to tmp which is used by the cli tool
+				fState.Corpus.WriteCaseToDisk(fState.CurrentFuzzCase)
+				// use tmp in case
+				//argv := fmt.Sprintf("%s ./out/output.txt", fState.Corpus.GetCurrentCasePath())
+				argv := []string{fState.Corpus.GetCurrentCasePath(), "./out/output.txt"}
+				fState.Spawn(argv)
+				//fState.Spawn(fState.Corpus.GetCurrentCasePath())
+				fState.InstrumentProcess(fState.FuzzCases == 0)
+			fState.CoverageLoop()
+			if fState.BreakPointsHit > fState.PreviousCoverageHit {
+				fState.PreviousCoverageHit = fState.BreakPointsHit
+				//fState.Corpus.AddToCorpus(caseBytes)
+			}
+			fState.FuzzCases++
+			fState.PrintStats()
+		}
+	*/
 	runtime.UnlockOSThread()
 }
 
@@ -386,6 +476,13 @@ func SetPC(pid int, pc uint64) {
 	}
 	regs.SetPC(pc)
 	err = syscall.PtraceSetRegs(pid, &regs)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func SetReg(pid int, r syscall.PtraceRegs) {
+	err := syscall.PtraceSetRegs(pid, &r)
 	if err != nil {
 		log.Fatal(err)
 	}
