@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"log"
 	"matcha/internal/snapshot"
@@ -35,69 +36,60 @@ type State struct {
 	BreakPoints          map[uint64][]byte
 }
 
+type InMemoryCorpus struct {
+	CorpusBuffers [][]byte
+	CorpusDir     string
+	CorpusCount   int
+}
+
+func (c *InMemoryCorpus) InitCorpus() {
+	var err error
+	entry, err := os.ReadDir("./corpus")
+	if err != nil {
+		log.Fatal(err)
+	}
+	c.CorpusBuffers = make([][]byte, c.CorpusCount)
+	for _, e := range entry {
+		if e.IsDir() {
+			continue
+		}
+		content, err := os.ReadFile(fmt.Sprintf("./corpus/%s", e.Name()))
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(len(content))
+		c.CorpusBuffers = append(c.CorpusBuffers, content)
+		c.CorpusCount++
+	}
+}
+
+func (c *InMemoryCorpus) Count() int {
+	return c.CorpusCount
+}
+
+func (c *InMemoryCorpus) GetCaseByIdx(idx int) []byte {
+	return c.CorpusBuffers[idx]
+}
+func (c *InMemoryCorpus) AddToCorpus(data []byte) {
+	c.CorpusBuffers = append(c.CorpusBuffers, data)
+	c.CorpusCount++
+	os.WriteFile(fmt.Sprintf("./corpus/%d.bin", c.CorpusCount), data, 0644)
+}
+
 type OnDiskCorpus struct {
-	CurrentFuzzCasePath   string
-	CurrentFuzzCaseDir    string
-	CurrentFuzzCaseBuffer []byte
-	CorpusCount           int
+	CurrentFuzzCasePath string
+	CurrentFuzzCaseDir  string
 }
 
 func NewOnDiskCorpus() *OnDiskCorpus {
 	return &OnDiskCorpus{}
 }
 
-func (c *OnDiskCorpus) InitCorpus() {
-	var err error
-	entry, err := os.ReadDir("./corpus")
-	if err != nil {
-		log.Fatal(err)
-	}
-	c.CorpusCount = len(entry) - 1
-	c.CurrentFuzzCaseDir = "./corpus"
-	c.CurrentFuzzCasePath = "./corpus/tmp.bin"
-	c.CurrentFuzzCaseBuffer, err = os.ReadFile("./corpus/1.bin")
-	if err != nil {
-		log.Fatal(err)
-	}
-}
-
-func (c *OnDiskCorpus) AddToCorpus(data []byte) {
-	c.CorpusCount++
-	os.WriteFile(fmt.Sprintf("./corpus/%d.bin", c.CorpusCount), data, 0644)
-}
-
-func (c *OnDiskCorpus) GetCurrentCasePath() string {
-	return c.CurrentFuzzCasePath
-}
-
-func (c *OnDiskCorpus) SetCurrentCasePath(path string) {
-	c.CurrentFuzzCasePath = path
-}
-
-func (c *OnDiskCorpus) GetRandomFuzzIndex() int {
-	return rand.Intn(c.CorpusCount-1) + 1
-}
-
-func (c *OnDiskCorpus) WriteCaseToDisk(data []byte) {
-	os.WriteFile(c.CurrentFuzzCasePath, data, 0644)
-}
-
-func (c *OnDiskCorpus) WriteCrashToDisk(crashCount int, data []byte) {
-	os.WriteFile(fmt.Sprintf("./crashes/%d", crashCount), data, 0644)
-}
-
-func (c *OnDiskCorpus) Count() int {
-	return c.CorpusCount
-}
-
 type Corpus interface {
 	InitCorpus()
-	AddToCorpus([]byte)
-	GetCurrentCasePath() string
-	WriteCaseToDisk([]byte)
 	Count() int
-	SetCurrentCasePath(string)
-	WriteCrashToDisk(int, []byte)
+	GetCaseByIdx(int) []byte
+	AddToCorpus([]byte)
 }
 
 func NewState(path string, baseAddress uint64, snapshotAddress uint64, restoreAddress uint64) *State {
@@ -108,6 +100,7 @@ func NewState(path string, baseAddress uint64, snapshotAddress uint64, restoreAd
 		PreviousCoverageHit: 0,
 		SnapshotAddress:     snapshotAddress,
 		RestoreAddress:      restoreAddress,
+		Corpus:              &InMemoryCorpus{},
 	}
 	state.BaseAddress = baseAddress
 	if state.BaseAddress == 0 {
@@ -221,14 +214,11 @@ func (s *State) UpdateCoverage() bool {
 	if _, ok := s.BreakPoints[pc]; !ok {
 		log.Fatalf("Not a breakpoint 0x%x\n", pc)
 	}
-	//fmt.Printf("BreakPoint PC -> 0x%x\n", pc)
 	s.BreakPointsHit++
 	originalBytes := s.BreakPoints[pc]
 	DelBP(s.Pid, uintptr(pc), originalBytes)
 	SubRip(s.Pid)
-	// remove breakpoint from hashmap
 	delete(s.BreakPoints, pc)
-	fmt.Println("bp removed")
 	return false
 }
 
@@ -236,9 +226,7 @@ func (s *State) PrintStats() {
 	percent := (float32(s.BreakPointsHit) / float32(s.TotalBreakPoints)) * 100.0
 	now := time.Now()
 	elapsed := now.Sub(START_TIME)
-	//fmt.Printf("INFO: Matcha Stats %s %d\n", s.Path, s.Pid)
-	fmt.Printf("INFO: Crashes %d Iterations %d Coverage %d/%d %2f Cases Per Second %f Seconds %f Hours %f\n", s.Crashes, s.FuzzCases, s.BreakPointsHit, s.TotalBreakPoints, percent, float64(s.FuzzCases)/elapsed.Seconds(), elapsed.Seconds(), elapsed.Hours())
-	//fmt.Printf("INFO: Iterations %d\n", s.FuzzCases)
+	fmt.Printf("INFO: Crashes %d Iterations %d Coverage %d/%d %2f Cases Per Second %f Seconds %f Hours %f Corpus %d\n", s.Crashes, s.FuzzCases, s.BreakPointsHit, s.TotalBreakPoints, percent, float64(s.FuzzCases)/elapsed.Seconds(), elapsed.Seconds(), elapsed.Hours(), s.Corpus.Count())
 }
 
 func (s *State) RestoreSnapshot() {
@@ -259,12 +247,12 @@ func (s *State) TakeSnapshot() {
 	if pc != s.SnapshotAddress {
 		log.Panicf("ERROR: Wrong breakpoint wanted 0x%x got 0x%x", s.SnapshotAddress, pc)
 	}
+
 	DelBP(s.Pid, uintptr(pc), s.SnapshotAddressBytes)
 	SubRip(s.Pid)
 	// Set BreakPoints for the whole process now to get coverage
 	fmt.Println("Instrumenting Child")
 	s.InstrumentProcess(true)
-	// SnapShot The Memory And Registers So We Restore To This Location
 	s.SnapshotData = snapshot.NewSnapshot(s.Pid)
 	fmt.Println("Snapshot Complete")
 }
@@ -275,7 +263,7 @@ func (s *State) CoverageLoop() {
 		if doBreak {
 			if signal == syscall.SIGSEGV {
 				s.Crashes++
-				s.Corpus.WriteCrashToDisk(int(s.Crashes), []byte(s.CurrentFuzzCase))
+				//s.Corpus.WriteCrashToDisk(int(s.Crashes), []byte(s.CurrentFuzzCase))
 				break
 			}
 		} else {
@@ -352,67 +340,87 @@ func Mutate(data []byte) {
 	}
 }
 
+func (s *State) FindEgg(egg string) (int, uint64, int) {
+	//panic("Find every possible location for our buffer and replace it")
+	for i, memory := range s.SnapshotData.Memory {
+		if offset := bytes.LastIndex(memory.RawData, []byte(egg)); offset != -1 {
+			return i, memory.Start + uint64(offset), offset
+		}
+	}
+	return 0, 0, 0
+}
+
+func (s *State) ReadBufferFromProcess(address uint64, buffer []byte) {
+	_, err := syscall.PtracePeekData(s.Pid, uintptr(address), buffer)
+	if err != nil {
+		log.Fatal("ERROR: ReadBufferFromProcess:::PracePeekData ", err)
+	}
+	//fmt.Println(string(buffer))
+}
+
+func (s *State) WriteBufferToProcess(address uint64, buffer []byte) {
+	path := fmt.Sprintf("/proc/%d/mem", s.Pid)
+	memPtr, err := os.OpenFile(path, os.O_RDWR, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer memPtr.Close()
+	_, err = memPtr.Seek(int64(address), 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = memPtr.Write(buffer)
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
 func main() {
-	rand.Seed(0x717171)
-	// 0x40128C right after fread returns
-	//
-	fState := NewState("./cli_test", 0x400000, 0x4012B0, 0x401398)
+	rand.Seed(0x71717171)
+	fState := NewState("./cli_test", 0x400000, 0x4012A9, 0x40138A)
 	fState.BreakPointAddresses = fState.GetBreakPointAddresses("cli_blocks.txt")
-	fState.Corpus = NewOnDiskCorpus()
+	buffer, err := os.ReadFile("./egg_payload.txt")
+	if err != nil {
+		log.Fatal(err)
+	}
 	fState.Corpus.InitCorpus()
 	START_TIME = time.Now()
 	runtime.LockOSThread()
 	fState.Spawn([]string{"./egg_payload.txt"})
 	fState.TakeSnapshot()
-	// Find Which Region Has Egg
-	// Read Egg In Memory To CurrentFuzzCaseBuffer
-	// DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF
-	// Only Modify That Region To Make It Easier
+	regionIdx, memoryAddress, _ := fState.FindEgg(string(buffer))
+	if regionIdx == 0 || memoryAddress == 0 {
+		panic("FAILED TO FIND EGG")
+	}
+	//fmt.Printf("0x%x %s\n", fState.SnapshotData.Memory[regionIdx].Start, fState.SnapshotData.Memory[regionIdx].Name)
+	//log.Fatalf("FOUND EGG 0x%x\n", memoryAddress)
 	for {
+		//tmp := make([]byte, bufferSz)
+		//fState.ReadBufferFromProcess(memoryAddress, tmp)
+		// pick something from corpus
+		nextCase := rand.Intn(fState.Corpus.Count()) % fState.Corpus.Count()
+		//fmt.Println(nextCase)
+		fState.CurrentFuzzCase = fState.Corpus.GetCaseByIdx(nextCase)
 		// Mutate Current Fuzz Case Buffer
-		// Write It Back To Memory Memory
+		Mutate(fState.CurrentFuzzCase)
+		// write fuzz case to memory
+		fState.WriteBufferToProcess(memoryAddress, fState.CurrentFuzzCase)
 		// Continue Execution
+		//fmt.Println("Before Continue")
+		//snapshot.MemoryDump(fState.Pid)
 		if fState.RestoreLoop() {
 			fState.RestoreSnapshot()
 			fState.FuzzCases++
-			fState.PrintStats()
 		}
-		// Check if we got more coverage
-		// If we did add to in memory corpus
 		if fState.BreakPointsHit > fState.PreviousCoverageHit {
 			fState.PreviousCoverageHit = fState.BreakPointsHit
-			//fState.Corpus.AddToCorpus(caseBytes)
+			fState.Corpus.AddToCorpus(fState.CurrentFuzzCase)
+		}
+		fState.PrintStats()
+		if fState.CurrentFuzzCase[0] == 0x41 && fState.CurrentFuzzCase[1] == 0x42 && fState.CurrentFuzzCase[2] == 0x43 {
+			panic("A HIT")
 		}
 	}
-	/*
-		for {
-				// random number
-				nextCase := rand.Intn(fState.Corpus.Count()-0) + 1
-				// use rand to pick from corpus
-				caseBytes, err := os.ReadFile(fmt.Sprintf("./corpus/%d.bin", nextCase))
-				if err != nil {
-					log.Fatal(err)
-				}
-				// mutate case
-				Mutate(caseBytes)
-				fState.CurrentFuzzCase = caseBytes
-				// write to tmp which is used by the cli tool
-				fState.Corpus.WriteCaseToDisk(fState.CurrentFuzzCase)
-				// use tmp in case
-				//argv := fmt.Sprintf("%s ./out/output.txt", fState.Corpus.GetCurrentCasePath())
-				argv := []string{fState.Corpus.GetCurrentCasePath(), "./out/output.txt"}
-				fState.Spawn(argv)
-				//fState.Spawn(fState.Corpus.GetCurrentCasePath())
-				fState.InstrumentProcess(fState.FuzzCases == 0)
-			fState.CoverageLoop()
-			if fState.BreakPointsHit > fState.PreviousCoverageHit {
-				fState.PreviousCoverageHit = fState.BreakPointsHit
-				//fState.Corpus.AddToCorpus(caseBytes)
-			}
-			fState.FuzzCases++
-			fState.PrintStats()
-		}
-	*/
 	runtime.UnlockOSThread()
 }
 

@@ -131,3 +131,24 @@ func GetRegionsFromProcess(pid int) []MemoryRegion {
 	}
 	return regions
 }
+
+func MemoryDump(pid int) {
+	path := fmt.Sprintf("/proc/%d/maps", pid)
+	rawMaps, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Only want writable memory regions that could have changed during execution
+	segments := strings.Split(string(rawMaps), "\n")
+	for i, s := range segments {
+		if len(s) < 1 {
+			continue
+		}
+		entry := strings.Split(s, " ")
+		if strings.Contains(entry[1], "rw") {
+			reg := ParseRegion(pid, s)
+			name := fmt.Sprintf("%d_%s.dump", i, reg.Name)
+			os.WriteFile(name, reg.RawData, 0644)
+		}
+	}
+}
