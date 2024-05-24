@@ -183,7 +183,8 @@ func (s *State) ContinueExec() (bool, syscall.Signal) {
 	}
 	// Handle Possible CRASHES Issues Here
 	if ws.StopSignal() == syscall.SIGSEGV {
-		panic("SEGFAULT")
+		os.WriteFile("./crashes/crash.bin", s.CurrentFuzzCase, 0644)
+		fmt.Println("WROTE CRASH")
 		return true, syscall.SIGSEGV
 	}
 	if ws.StopSignal() == syscall.SIGABRT {
@@ -288,6 +289,8 @@ func (s *State) RestoreLoop() bool {
 		}
 		switch ws.StopSignal() {
 		case syscall.SIGSEGV:
+			os.WriteFile("./crashes/crash.bin", s.CurrentFuzzCase, 0644)
+			fmt.Println("WROTE CRASH")
 			panic("SEGFAULT")
 		case syscall.SIGTRAP:
 			return s.UpdateCoverage()
@@ -308,9 +311,13 @@ var START_TIME time.Time
 
 func Mutate(data []byte) {
 	counter := 0
-	// Mutate 5% of the bytes
-	mutationsPerCycle := 5 * len(data) / 100
+	// Mutate 12% of the bytes
+	// ByteFlip Bit Flip And Random Insert
+	mutationsPerCycle := 12 * len(data) / 100
 	for {
+		randBitFlip := rand.Intn((7+1)-0) + 0
+		randByte := rand.Intn((len(data))-0) + 0
+		data[randByte] ^= (1 << randBitFlip)
 		randStrat := rand.Intn(5-0) + 0
 		switch randStrat {
 		case 0:
@@ -328,9 +335,6 @@ func Mutate(data []byte) {
 		case 3:
 			randByte := rand.Intn((len(data))-0) + 0
 			data[randByte] = 0x0
-		case 4:
-			randByte := rand.Intn((len(data))-0) + 0
-			data[randByte] = 0xFF
 		default:
 		}
 		counter++
@@ -376,7 +380,7 @@ func (s *State) WriteBufferToProcess(address uint64, buffer []byte) {
 }
 
 func main() {
-	rand.Seed(0x71717171)
+	rand.Seed(123)
 	fState := NewState("./cli_test", 0x400000, 0x4012A9, 0x40138A)
 	fState.BreakPointAddresses = fState.GetBreakPointAddresses("cli_blocks.txt")
 	buffer, err := os.ReadFile("./egg_payload.txt")
@@ -408,6 +412,7 @@ func main() {
 		// Continue Execution
 		//fmt.Println("Before Continue")
 		//snapshot.MemoryDump(fState.Pid)
+		//panic("DUMP")
 		if fState.RestoreLoop() {
 			fState.RestoreSnapshot()
 			fState.FuzzCases++
@@ -417,9 +422,6 @@ func main() {
 			fState.Corpus.AddToCorpus(fState.CurrentFuzzCase)
 		}
 		fState.PrintStats()
-		if fState.CurrentFuzzCase[0] == 0x41 && fState.CurrentFuzzCase[1] == 0x42 && fState.CurrentFuzzCase[2] == 0x43 {
-			panic("A HIT")
-		}
 	}
 	runtime.UnlockOSThread()
 }

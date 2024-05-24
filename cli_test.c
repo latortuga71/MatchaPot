@@ -17,6 +17,9 @@ int main(int argc, char **argv) {
   printf("File Size is %lu \n", file_size);
   char *buffer = (char *)malloc(sizeof(char) * file_size);
   fread(buffer, 1, file_size, fptr);
+  // WE Probably Want To SnapShot Here
+  // Provide File That Has All 0x41 so we can easily identify location in memory
+  // and swap it out
   if (buffer[0] == 'A') {
     if (buffer[1] == 'B') {
       if (buffer[2] == 'C') {
@@ -29,8 +32,7 @@ int main(int argc, char **argv) {
                     if (buffer[9] == 'J') {
                       if (buffer[10] == 'K') {
                         if (buffer[11] == 'L') {
-                          int crash = *(int *)0xFFF2351F;
-                          printf("crash");
+                          *(int *)0 = 0;
                         }
                       }
                     }
@@ -43,6 +45,7 @@ int main(int argc, char **argv) {
       }
     }
   }
+  // We Probably Want To Restore Here
   free(buffer);
   return 0;
 }
