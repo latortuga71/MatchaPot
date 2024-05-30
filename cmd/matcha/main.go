@@ -36,15 +36,10 @@ type State struct {
 	BreakPoints          map[uint64][]byte
 }
 
-type InMemoryCorpus struct {
-	CorpusBuffers [][]byte
-	CorpusDir     string
-	CorpusCount   int
-}
-
-func (c *InMemoryCorpus) InitCorpus() {
+func (c *Corpus) InitCorpus(corpusDir string) {
 	var err error
-	entry, err := os.ReadDir("./corpus")
+	c.CorpusDir = corpusDir
+	entry, err := os.ReadDir(corpusDir)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -53,43 +48,39 @@ func (c *InMemoryCorpus) InitCorpus() {
 		if e.IsDir() {
 			continue
 		}
-		content, err := os.ReadFile(fmt.Sprintf("./corpus/%s", e.Name()))
+		content, err := os.ReadFile(fmt.Sprintf("%s/%s", corpusDir, e.Name()))
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Println(len(content))
 		c.CorpusBuffers = append(c.CorpusBuffers, content)
 		c.CorpusCount++
 	}
 }
-
-func (c *InMemoryCorpus) Count() int {
-	return c.CorpusCount
-}
-
-func (c *InMemoryCorpus) GetCaseByIdx(idx int) []byte {
+func (c *Corpus) GetCaseByIdx(idx int) []byte {
 	return c.CorpusBuffers[idx]
 }
-func (c *InMemoryCorpus) AddToCorpus(data []byte) {
+
+func (c *Corpus) WriteFuzzCaseToDisk(path string, buffer []byte) {
+	err := os.WriteFile(path, buffer, 0644)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (c *Corpus) AddToCorpus(data []byte) {
 	c.CorpusBuffers = append(c.CorpusBuffers, data)
 	c.CorpusCount++
-	os.WriteFile(fmt.Sprintf("./corpus/%d.bin", c.CorpusCount), data, 0644)
+	err := os.WriteFile(fmt.Sprintf("%s/%d.bin", c.CorpusDir, c.CorpusCount), data, 0644)
+	if err != nil {
+		panic(err)
+	}
+
 }
 
-type OnDiskCorpus struct {
-	CurrentFuzzCasePath string
-	CurrentFuzzCaseDir  string
-}
-
-func NewOnDiskCorpus() *OnDiskCorpus {
-	return &OnDiskCorpus{}
-}
-
-type Corpus interface {
-	InitCorpus()
-	Count() int
-	GetCaseByIdx(int) []byte
-	AddToCorpus([]byte)
+type Corpus struct {
+	CorpusBuffers [][]byte
+	CorpusDir     string
+	CorpusCount   int
 }
 
 func NewState(path string, baseAddress uint64, snapshotAddress uint64, restoreAddress uint64) *State {
@@ -100,7 +91,6 @@ func NewState(path string, baseAddress uint64, snapshotAddress uint64, restoreAd
 		PreviousCoverageHit: 0,
 		SnapshotAddress:     snapshotAddress,
 		RestoreAddress:      restoreAddress,
-		Corpus:              &InMemoryCorpus{},
 	}
 	state.BaseAddress = baseAddress
 	if state.BaseAddress == 0 {
@@ -112,14 +102,14 @@ func NewState(path string, baseAddress uint64, snapshotAddress uint64, restoreAd
 
 func (s *State) Spawn(args []string) int {
 	path := s.Path
-	//devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
+	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
 	cmd := exec.Command(path)
 	cmd.Args = []string{path}
 	cmd.Args = append(cmd.Args, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	//cmd.Stdout = devNull
-	//cmd.Stderr = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
 	cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
 	err := cmd.Start()
 	if err != nil {
@@ -169,7 +159,21 @@ func (s *State) InstrumentProcess(firstTime bool) {
 		}
 	}
 }
-
+func (s *State) CoverageLoop() {
+	for {
+		exited, signal := s.ContinueExec()
+		// child exited spawn new
+		if exited {
+			break
+		} else {
+			// handle a signal
+			if signal == syscall.SIGSEGV {
+				panic("CRASH!")
+			}
+		}
+		s.UpdateCoverage()
+	}
+}
 func (s *State) ContinueExec() (bool, syscall.Signal) {
 	ContinueExec(s.Pid)
 	var ws syscall.WaitStatus
@@ -177,33 +181,23 @@ func (s *State) ContinueExec() (bool, syscall.Signal) {
 	if err != nil {
 		log.Fatal("ERROR: State:::ContinueExec:::Syscall.Wait4 ", err)
 	}
-	if ws.Signaled() {
-		fmt.Fprintf(os.Stderr, "\nDEBUG: SIGNAL")
-		panic("HANDLE SIGNALS?")
-	}
-	// Handle Possible CRASHES Issues Here
-	if ws.StopSignal() == syscall.SIGSEGV {
-		os.WriteFile("./crashes/crash.bin", s.CurrentFuzzCase, 0644)
-		fmt.Println("WROTE CRASH")
-		return true, syscall.SIGSEGV
-	}
-	if ws.StopSignal() == syscall.SIGABRT {
-		panic("SEGABORT")
-		return true, syscall.SIGSEGV
-	}
-	if ws.StopSignal() == syscall.SIGBUS {
-		panic("SEGBUS")
-		return true, syscall.SIGBUS
-	}
-	if ws.StopSignal() == syscall.SIGTRAP {
-		// a breakpoint
-		return false, syscall.SIGTRAP
-	}
+	// if process exited handle that
 	if ws.Exited() {
-		return false, 0
+		return true, -1
 	}
-	log.Fatalf("UNKNOWN SIGNAL %d", ws.StopSignal())
-	return false, 0
+	// if we got a signal could mean a crash handle that
+	switch ws.StopSignal() {
+	case syscall.SIGSEGV:
+		return false, syscall.SIGSEGV
+	case syscall.SIGBUS:
+		return false, syscall.SIGBUS
+	case syscall.SIGABRT:
+		return false, syscall.SIGABRT
+	case syscall.SIGTRAP:
+		return false, syscall.SIGTRAP
+	default:
+		return false, syscall.Signal(-1)
+	}
 }
 
 func (s *State) UpdateCoverage() bool {
@@ -227,7 +221,7 @@ func (s *State) PrintStats() {
 	percent := (float32(s.BreakPointsHit) / float32(s.TotalBreakPoints)) * 100.0
 	now := time.Now()
 	elapsed := now.Sub(START_TIME)
-	fmt.Printf("INFO: Crashes %d Iterations %d Coverage %d/%d %2f Cases Per Second %f Seconds %f Hours %f Corpus %d\n", s.Crashes, s.FuzzCases, s.BreakPointsHit, s.TotalBreakPoints, percent, float64(s.FuzzCases)/elapsed.Seconds(), elapsed.Seconds(), elapsed.Hours(), s.Corpus.Count())
+	fmt.Printf("INFO: Crashes %d Iterations %d Coverage %d/%d %2f Cases Per Second %f Seconds %f Hours %f Corpus %d\n", s.Crashes, s.FuzzCases, s.BreakPointsHit, s.TotalBreakPoints, percent, float64(s.FuzzCases)/elapsed.Seconds(), elapsed.Seconds(), elapsed.Hours(), s.Corpus.CorpusCount)
 }
 
 func (s *State) RestoreSnapshot() {
@@ -256,23 +250,6 @@ func (s *State) TakeSnapshot() {
 	s.InstrumentProcess(true)
 	s.SnapshotData = snapshot.NewSnapshot(s.Pid)
 	fmt.Println("Snapshot Complete")
-}
-
-func (s *State) CoverageLoop() {
-	for {
-		doBreak, signal := s.ContinueExec()
-		if doBreak {
-			if signal == syscall.SIGSEGV {
-				s.Crashes++
-				//s.Corpus.WriteCrashToDisk(int(s.Crashes), []byte(s.CurrentFuzzCase))
-				break
-			}
-		} else {
-			// child exited
-			break
-		}
-		s.UpdateCoverage()
-	}
 }
 
 func (s *State) RestoreLoop() bool {
@@ -311,29 +288,24 @@ var START_TIME time.Time
 
 func Mutate(data []byte) {
 	counter := 0
-	// Mutate 12% of the bytes
+	// Mutate 8% of the bytes
 	// ByteFlip Bit Flip And Random Insert
-	mutationsPerCycle := 12 * len(data) / 100
+	mutationsPerCycle := 8 * len(data) / 100
+	//mutationsPerCycle := 1
 	for {
 		randBitFlip := rand.Intn((7+1)-0) + 0
+		randByteFlip := rand.Intn((len(data))-0) + 0
 		randByte := rand.Intn((len(data))-0) + 0
-		data[randByte] ^= (1 << randBitFlip)
+		randByteInsert := rand.Intn(255-0) + 0
 		randStrat := rand.Intn(5-0) + 0
 		switch randStrat {
 		case 0:
-			randBitFlip := rand.Intn((7+1)-0) + 0
-			randByte := rand.Intn((len(data))-0) + 0
 			data[randByte] ^= (1 << randBitFlip)
 		case 1:
-			randByte := rand.Intn((len(data))-0) + 0
-			randByteFlip := rand.Intn(255-0) + 0
 			data[randByte] ^= byte(randByteFlip)
 		case 2:
-			randByte := rand.Intn((len(data))-0) + 0
-			randByteInsert := rand.Intn(255-0) + 0
 			data[randByte] = byte(randByteInsert)
 		case 3:
-			randByte := rand.Intn((len(data))-0) + 0
 			data[randByte] = 0x0
 		default:
 		}
@@ -345,9 +317,9 @@ func Mutate(data []byte) {
 }
 
 func (s *State) FindEgg(egg string) (int, uint64, int) {
-	//panic("Find every possible location for our buffer and replace it")
+	panic("Find every possible location for our buffer and replace it")
 	for i, memory := range s.SnapshotData.Memory {
-		if offset := bytes.LastIndex(memory.RawData, []byte(egg)); offset != -1 {
+		if offset := bytes.Index(memory.RawData, []byte(egg)); offset != -1 {
 			return i, memory.Start + uint64(offset), offset
 		}
 	}
@@ -379,51 +351,85 @@ func (s *State) WriteBufferToProcess(address uint64, buffer []byte) {
 	}
 }
 
-func main() {
+func SnapshotFuzzMode() {
+}
+func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string) {
 	rand.Seed(123)
-	fState := NewState("./cli_test", 0x400000, 0x4012A9, 0x40138A)
-	fState.BreakPointAddresses = fState.GetBreakPointAddresses("cli_blocks.txt")
-	buffer, err := os.ReadFile("./egg_payload.txt")
-	if err != nil {
-		log.Fatal(err)
-	}
-	fState.Corpus.InitCorpus()
+	fState := NewState(target, baseAddress, 0x0, 0x0)
+	// init corpus
+	fState.Corpus.InitCorpus(corpusDir)
+	fState.CurrentFuzzCase = make([]byte, len(fState.Corpus.CorpusBuffers[0]))
 	START_TIME = time.Now()
 	runtime.LockOSThread()
-	fState.Spawn([]string{"./egg_payload.txt"})
-	fState.TakeSnapshot()
-	regionIdx, memoryAddress, _ := fState.FindEgg(string(buffer))
-	if regionIdx == 0 || memoryAddress == 0 {
-		panic("FAILED TO FIND EGG")
-	}
-	//fmt.Printf("0x%x %s\n", fState.SnapshotData.Memory[regionIdx].Start, fState.SnapshotData.Memory[regionIdx].Name)
-	//log.Fatalf("FOUND EGG 0x%x\n", memoryAddress)
+	payloadPath := fmt.Sprintf("%s/tmp.bin", corpusDir)
+	fState.BreakPointAddresses = fState.GetBreakPointAddresses(blocksFile)
+	var nextCase int = 0
 	for {
-		//tmp := make([]byte, bufferSz)
-		//fState.ReadBufferFromProcess(memoryAddress, tmp)
-		// pick something from corpus
-		nextCase := rand.Intn(fState.Corpus.Count()) % fState.Corpus.Count()
-		//fmt.Println(nextCase)
-		fState.CurrentFuzzCase = fState.Corpus.GetCaseByIdx(nextCase)
-		// Mutate Current Fuzz Case Buffer
+		nextCase = rand.Intn(len(fState.Corpus.CorpusBuffers))
+		// Mutate Copy
+		copy(fState.CurrentFuzzCase, fState.Corpus.GetCaseByIdx(nextCase))
 		Mutate(fState.CurrentFuzzCase)
-		// write fuzz case to memory
-		fState.WriteBufferToProcess(memoryAddress, fState.CurrentFuzzCase)
-		// Continue Execution
-		//fmt.Println("Before Continue")
-		//snapshot.MemoryDump(fState.Pid)
-		//panic("DUMP")
-		if fState.RestoreLoop() {
-			fState.RestoreSnapshot()
-			fState.FuzzCases++
-		}
+		// Write To payload tmp path
+		fState.Corpus.WriteFuzzCaseToDisk(payloadPath, fState.CurrentFuzzCase)
+		// spawn using that path
+		fState.Spawn([]string{payloadPath})
+		fState.InstrumentProcess(fState.FuzzCases == 0)
+		fState.CoverageLoop()
 		if fState.BreakPointsHit > fState.PreviousCoverageHit {
 			fState.PreviousCoverageHit = fState.BreakPointsHit
 			fState.Corpus.AddToCorpus(fState.CurrentFuzzCase)
 		}
+		fState.FuzzCases++
 		fState.PrintStats()
 	}
+	/*
+		fState.BreakPointAddresses = fState.GetBreakPointAddresses("cli_blocks.txt")
+		buffer, err := os.ReadFile("./egg_payload.txt")
+		if err != nil {
+			log.Fatal(err)
+		}
+		fState.Corpus.InitCorpus()
+		START_TIME = time.Now()
+		runtime.LockOSThread()
+		fState.Spawn([]string{"./egg_payload.txt"})
+		fState.TakeSnapshot()
+		regionIdx, memoryAddress, _ := fState.FindEgg(string(buffer))
+		if regionIdx == 0 || memoryAddress == 0 {
+			panic("FAILED TO FIND EGG")
+		}
+		//fmt.Printf("0x%x %s\n", fState.SnapshotData.Memory[regionIdx].Start, fState.SnapshotData.Memory[regionIdx].Name)
+		//log.Fatalf("FOUND EGG 0x%x\n", memoryAddress)
+		for {
+			//tmp := make([]byte, bufferSz)
+			//fState.ReadBufferFromProcess(memoryAddress, tmp)
+			// pick something from corpus
+			nextCase := rand.Intn(fState.Corpus.Count()) % fState.Corpus.Count()
+			//fmt.Println(nextCase)
+			fState.CurrentFuzzCase = fState.Corpus.GetCaseByIdx(nextCase)
+			// Mutate Current Fuzz Case Buffer
+			Mutate(fState.CurrentFuzzCase)
+			// write fuzz case to memory
+			fState.WriteBufferToProcess(memoryAddress, fState.CurrentFuzzCase)
+			// Continue Execution
+			//fmt.Println("Before Continue")
+			//snapshot.MemoryDump(fState.Pid)
+			//panic("DUMP")
+			if fState.RestoreLoop() {
+				fState.RestoreSnapshot()
+				fState.FuzzCases++
+			}
+			if fState.BreakPointsHit > fState.PreviousCoverageHit {
+				fState.PreviousCoverageHit = fState.BreakPointsHit
+				fState.Corpus.AddToCorpus(fState.CurrentFuzzCase)
+			}
+			fState.PrintStats()
+		}
+	*/
 	runtime.UnlockOSThread()
+}
+
+func main() {
+	SpawnFuzzMode("./cli_test", 0x400000, "./cli_blocks.txt", "./corpus")
 }
 
 func SetBP(pid int, address uintptr) []byte {
