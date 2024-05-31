@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+var START_TIME time.Time
+
 type State struct {
 	Pid                  int
 	BaseAddress          uint64
@@ -299,14 +301,11 @@ func (s *State) RestoreLoop() bool {
 	}
 }
 
-var START_TIME time.Time
-
 func Mutate(data []byte) {
 	counter := 0
 	// Mutate 8% of the bytes
 	// ByteFlip Bit Flip And Random Insert
 	mutationsPerCycle := 8 * len(data) / 100
-	//mutationsPerCycle := 1
 	for {
 		randByte := rand.Intn((len(data))-0) + 0
 		randBitFlip := rand.Intn((7+1)-0) + 0
@@ -366,37 +365,13 @@ func (s *State) WriteBufferToProcess(address uint64, buffer []byte) {
 	}
 }
 
-func SnapshotFuzzMode() {
-}
-func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string, crashesDir string) {
-	rand.Seed(123)
-	fState := NewState(target, baseAddress, 0x0, 0x0)
-	// init corpus
-	fState.Corpus.InitCorpus(corpusDir, crashesDir)
-	fState.CurrentFuzzCase = make([]byte, len(fState.Corpus.CorpusBuffers[0]))
-	START_TIME = time.Now()
-	runtime.LockOSThread()
-	payloadPath := fmt.Sprintf("%s/tmp.bin", corpusDir)
-	fState.BreakPointAddresses = fState.GetBreakPointAddresses(blocksFile)
-	var nextCase int = 0
-	for {
-		nextCase = rand.Intn(len(fState.Corpus.CorpusBuffers))
-		copy(fState.CurrentFuzzCase, fState.Corpus.GetCaseByIdx(nextCase))
-		// Mutate Copy
-		Mutate(fState.CurrentFuzzCase)
-		// Write To payload tmp path
-		fState.Corpus.WriteFuzzCaseToDisk(payloadPath, fState.CurrentFuzzCase)
-		// spawn using that path
-		fState.Spawn([]string{payloadPath})
-		fState.InstrumentProcess(fState.FuzzCases == 0)
-		fState.CoverageLoop()
-		if fState.BreakPointsHit > fState.PreviousCoverageHit {
-			fState.PreviousCoverageHit = fState.BreakPointsHit
-			fState.Corpus.AddToCorpus(fState.CurrentFuzzCase)
-		}
-		fState.FuzzCases++
-		fState.PrintStats()
-	}
+func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string, crashesDir string, snapshotAddress uint64, restoreAddress uint64) {
+	panic("todo redo snapshotfuzz mode")
+	// Most Annoying Part Is Getting The First Snapshot With An Egg As Payload So it Can Be Replaced Easily With Fuzz Cases
+	// Usually payloads are stored on the heap so that can be searched for the egg
+	// Spawn Mode was 100 iterations per second
+	// SnapShot Mode Should Increase Performance
+	//
 	/*
 		fState.BreakPointAddresses = fState.GetBreakPointAddresses("cli_blocks.txt")
 		buffer, err := os.ReadFile("./egg_payload.txt")
@@ -440,6 +415,36 @@ func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusD
 			fState.PrintStats()
 		}
 	*/
+}
+func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string, crashesDir string) {
+	rand.Seed(123)
+	fState := NewState(target, baseAddress, 0x0, 0x0)
+	// init corpus
+	fState.Corpus.InitCorpus(corpusDir, crashesDir)
+	fState.CurrentFuzzCase = make([]byte, len(fState.Corpus.CorpusBuffers[0]))
+	START_TIME = time.Now()
+	runtime.LockOSThread()
+	payloadPath := fmt.Sprintf("%s/tmp.bin", corpusDir)
+	fState.BreakPointAddresses = fState.GetBreakPointAddresses(blocksFile)
+	var nextCase int = 0
+	for {
+		nextCase = rand.Intn(len(fState.Corpus.CorpusBuffers))
+		copy(fState.CurrentFuzzCase, fState.Corpus.GetCaseByIdx(nextCase))
+		// Mutate Copy
+		Mutate(fState.CurrentFuzzCase)
+		// Write To payload tmp path
+		fState.Corpus.WriteFuzzCaseToDisk(payloadPath, fState.CurrentFuzzCase)
+		// spawn using that path
+		fState.Spawn([]string{payloadPath})
+		fState.InstrumentProcess(fState.FuzzCases == 0)
+		fState.CoverageLoop()
+		if fState.BreakPointsHit > fState.PreviousCoverageHit {
+			fState.PreviousCoverageHit = fState.BreakPointsHit
+			fState.Corpus.AddToCorpus(fState.CurrentFuzzCase)
+		}
+		fState.FuzzCases++
+		fState.PrintStats()
+	}
 	runtime.UnlockOSThread()
 }
 
