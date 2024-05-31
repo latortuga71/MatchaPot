@@ -257,7 +257,12 @@ func (s *State) TakeSnapshot() {
 	s.SnapshotAddressBytes = SetBP(s.Pid, uintptr(s.SnapshotAddress))
 	s.RestoreAddressBytes = SetBP(s.Pid, uintptr(s.RestoreAddress))
 	// Run Until We Hit Above Snapshot BreakPoint
-	s.ContinueExec()
+	exited, signal := s.ContinueExec()
+	if signal != syscall.SIGTRAP {
+		if exited {
+			panic("Something went wrong process should not have exited yet")
+		}
+	}
 	r := GetReg(s.Pid)
 	pc := r.PC() - 1
 	if pc != s.SnapshotAddress {
@@ -385,8 +390,15 @@ func GenerateEgg(sz int) []byte {
 	return egg
 }
 
+func ReadEggFromDisk(path string) []byte {
+	egg, err := os.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
+	return egg
+}
+
 func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string, crashesDir string, snapshotAddress uint64, restoreAddress uint64) {
-	panic("todo redo snapshotfuzz mode")
 	rand.Seed(123)
 	fState := NewState(target, baseAddress, snapshotAddress, restoreAddress)
 	// init corpus
@@ -397,7 +409,8 @@ func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corp
 	runtime.LockOSThread()
 	// Generate Egg
 	//GenerateEggPayload()
-	egg := GenerateEgg(len(fState.Corpus.CorpusBuffers[0]))
+	//egg := GenerateEgg(len(fState.Corpus.CorpusBuffers[0]))
+	egg := ReadEggFromDisk("./egg.bin")
 	payloadPath := fmt.Sprintf("%s/tmp.bin", corpusDir)
 	err := os.WriteFile(payloadPath, egg, 0644)
 	if err != nil {
@@ -410,7 +423,7 @@ func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corp
 	// Take Snapshot
 	fState.TakeSnapshot()
 	// We should be stopped at the restore address with the memory snapshotted
-	// Find Egg Now
+	// Find Egg Now So we know where to overwrite it
 	addressesOfEgg := fState.FindEgg(egg)
 	for {
 		nextCase := rand.Intn(len(fState.Corpus.CorpusBuffers))
@@ -421,8 +434,8 @@ func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corp
 		for _, address := range addressesOfEgg {
 			fState.WriteBufferToProcess(address, fState.CurrentFuzzCase)
 		}
-		if fState.CoverageLoop() {
-
+		hitRestorePoint := fState.CoverageLoop()
+		if hitRestorePoint {
 			fState.RestoreSnapshot()
 			fState.FuzzCases++
 		}
@@ -434,6 +447,7 @@ func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corp
 	}
 
 }
+
 func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string, crashesDir string) {
 	rand.Seed(123)
 	fState := NewState(target, baseAddress, 0x0, 0x0)
@@ -467,7 +481,8 @@ func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusD
 }
 
 func main() {
-	SpawnFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes")
+	//SpawnFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes")
+	SnapShotFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes", 0x40B782, 0x402B0E)
 }
 
 func SetBP(pid int, address uintptr) []byte {
