@@ -365,9 +365,16 @@ func (s *State) WriteBufferToProcess(address uint64, buffer []byte) {
 	}
 }
 
+func GenerateEgg(sz int) []byte {
+	egg := make([]byte, sz)
+	for i := range egg {
+		egg[i] = 0x41
+	}
+	return egg
+}
+
 func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string, crashesDir string, snapshotAddress uint64, restoreAddress uint64) {
 	panic("todo redo snapshotfuzz mode")
-	var nextCase int = 0
 	rand.Seed(123)
 	fState := NewState(target, baseAddress, snapshotAddress, restoreAddress)
 	// init corpus
@@ -378,7 +385,12 @@ func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corp
 	runtime.LockOSThread()
 	// Generate Egg
 	//GenerateEggPayload()
+	egg := GenerateEgg(len(fState.Corpus.CorpusBuffers[0]))
 	payloadPath := fmt.Sprintf("%s/tmp.bin", corpusDir)
+	err := os.WriteFile(payloadPath, egg, 0644)
+	if err != nil {
+		panic(err)
+	}
 	// Load Breakpoints into list
 	fState.BreakPointAddresses = fState.GetBreakPointAddresses(blocksFile)
 	// Write To payload tmp path
