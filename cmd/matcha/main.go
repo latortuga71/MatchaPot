@@ -367,10 +367,38 @@ func (s *State) WriteBufferToProcess(address uint64, buffer []byte) {
 
 func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string, crashesDir string, snapshotAddress uint64, restoreAddress uint64) {
 	panic("todo redo snapshotfuzz mode")
-	// Most Annoying Part Is Getting The First Snapshot With An Egg As Payload So it Can Be Replaced Easily With Fuzz Cases
-	// Usually payloads are stored on the heap so that can be searched for the egg
-	// Spawn Mode was 100 iterations per second
-	// SnapShot Mode Should Increase Performance
+	var nextCase int = 0
+	rand.Seed(123)
+	fState := NewState(target, baseAddress, snapshotAddress, restoreAddress)
+	// init corpus
+	fState.Corpus.InitCorpus(corpusDir, crashesDir)
+	// Get Fuzz Case Size
+	fState.CurrentFuzzCase = make([]byte, len(fState.Corpus.CorpusBuffers[0]))
+	START_TIME = time.Now()
+	runtime.LockOSThread()
+	// Generate Egg
+	//GenerateEggPayload()
+	payloadPath := fmt.Sprintf("%s/tmp.bin", corpusDir)
+	// Load Breakpoints into list
+	fState.BreakPointAddresses = fState.GetBreakPointAddresses(blocksFile)
+	// Write To payload tmp path
+	fState.Corpus.WriteFuzzCaseToDisk(payloadPath, fState.CurrentFuzzCase)
+	// spawn using that path with egg payload there
+	fState.Spawn([]string{payloadPath})
+	// Take Snapshot
+	fState.TakeSnapshot()
+	// We should be stopped at the restore address with the memory snapshotted
+	// Find Egg Now
+	regionIndex, eggMemoryAddresses := fState.FindEgg("EGG")
+	for {
+		// Pick From Corpus
+		// Mutatate
+		// Write To Process Memory
+		// Coverage Loop
+		// Restore BreakPoint Hit
+		// Restore Snapshot
+	}
+
 	//
 	/*
 		fState.BreakPointAddresses = fState.GetBreakPointAddresses("cli_blocks.txt")
