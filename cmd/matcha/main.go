@@ -329,15 +329,23 @@ func Mutate(data []byte) {
 		}
 	}
 }
-
-func (s *State) FindEgg(egg string) (int, uint64, int) {
-	panic("Find every possible location for our buffer and replace it")
-	for i, memory := range s.SnapshotData.Memory {
-		if offset := bytes.Index(memory.RawData, []byte(egg)); offset != -1 {
-			return i, memory.Start + uint64(offset), offset
-		}
+func findAllOccurrences(data []byte, search []byte, regionOffset uint64) []uint64 {
+	results := make([]uint64, 0)
+	searchData := data
+	term := search
+	for x, d := bytes.Index(searchData, term), 0; x > -1; x, d = bytes.Index(searchData, term), d+x+1 {
+		results = append(results, uint64((x+d))+uint64(regionOffset))
+		searchData = searchData[x+1:]
 	}
-	return 0, 0, 0
+	return results
+}
+
+func (s *State) FindEgg(egg []byte) []uint64 {
+	locations := make([]uint64, 0)
+	for _, mem := range s.SnapshotData.Memory {
+		locations = append(locations, findAllOccurrences(mem.RawData, egg, mem.Start)...)
+	}
+	return locations
 }
 
 func (s *State) ReadBufferFromProcess(address uint64, buffer []byte) {
@@ -393,15 +401,13 @@ func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corp
 	}
 	// Load Breakpoints into list
 	fState.BreakPointAddresses = fState.GetBreakPointAddresses(blocksFile)
-	// Write To payload tmp path
-	fState.Corpus.WriteFuzzCaseToDisk(payloadPath, fState.CurrentFuzzCase)
 	// spawn using that path with egg payload there
 	fState.Spawn([]string{payloadPath})
 	// Take Snapshot
 	fState.TakeSnapshot()
 	// We should be stopped at the restore address with the memory snapshotted
 	// Find Egg Now
-	regionIndex, eggMemoryAddresses := fState.FindEgg("EGG")
+	fState.FindEgg(egg)
 	for {
 		// Pick From Corpus
 		// Mutatate
