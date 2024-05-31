@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"matcha/internal/snapshot"
@@ -36,9 +38,10 @@ type State struct {
 	BreakPoints          map[uint64][]byte
 }
 
-func (c *Corpus) InitCorpus(corpusDir string) {
+func (c *Corpus) InitCorpus(corpusDir string, crashDir string) {
 	var err error
 	c.CorpusDir = corpusDir
+	c.CrashDir = crashDir
 	entry, err := os.ReadDir(corpusDir)
 	if err != nil {
 		log.Fatal(err)
@@ -76,10 +79,19 @@ func (c *Corpus) AddToCorpus(data []byte) {
 	}
 
 }
+func (c *Corpus) WriteCrashToDisk(data []byte) {
+	hash := md5.Sum(data)
+	name := hex.EncodeToString(hash[:])
+	err := os.WriteFile(fmt.Sprintf("./%s/%s.bin", c.CrashDir, name), data, 0644)
+	if err != nil {
+		panic(err)
+	}
+}
 
 type Corpus struct {
 	CorpusBuffers [][]byte
 	CorpusDir     string
+	CrashDir      string
 	CorpusCount   int
 }
 
@@ -166,9 +178,12 @@ func (s *State) CoverageLoop() {
 		if exited {
 			break
 		} else {
-			// handle a signal
+			// handle a segfault by adding to corpus as well as writing the crash to disk
 			if signal == syscall.SIGSEGV {
-				panic("CRASH!")
+				s.Corpus.WriteCrashToDisk(s.CurrentFuzzCase)
+				s.Corpus.AddToCorpus(s.CurrentFuzzCase)
+				s.Crashes++
+				break
 			}
 		}
 		s.UpdateCoverage()
@@ -293,9 +308,9 @@ func Mutate(data []byte) {
 	mutationsPerCycle := 8 * len(data) / 100
 	//mutationsPerCycle := 1
 	for {
+		randByte := rand.Intn((len(data))-0) + 0
 		randBitFlip := rand.Intn((7+1)-0) + 0
 		randByteFlip := rand.Intn((len(data))-0) + 0
-		randByte := rand.Intn((len(data))-0) + 0
 		randByteInsert := rand.Intn(255-0) + 0
 		randStrat := rand.Intn(5-0) + 0
 		switch randStrat {
@@ -353,11 +368,11 @@ func (s *State) WriteBufferToProcess(address uint64, buffer []byte) {
 
 func SnapshotFuzzMode() {
 }
-func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string) {
+func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string, crashesDir string) {
 	rand.Seed(123)
 	fState := NewState(target, baseAddress, 0x0, 0x0)
 	// init corpus
-	fState.Corpus.InitCorpus(corpusDir)
+	fState.Corpus.InitCorpus(corpusDir, crashesDir)
 	fState.CurrentFuzzCase = make([]byte, len(fState.Corpus.CorpusBuffers[0]))
 	START_TIME = time.Now()
 	runtime.LockOSThread()
@@ -366,8 +381,8 @@ func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusD
 	var nextCase int = 0
 	for {
 		nextCase = rand.Intn(len(fState.Corpus.CorpusBuffers))
-		// Mutate Copy
 		copy(fState.CurrentFuzzCase, fState.Corpus.GetCaseByIdx(nextCase))
+		// Mutate Copy
 		Mutate(fState.CurrentFuzzCase)
 		// Write To payload tmp path
 		fState.Corpus.WriteFuzzCaseToDisk(payloadPath, fState.CurrentFuzzCase)
@@ -429,7 +444,7 @@ func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusD
 }
 
 func main() {
-	SpawnFuzzMode("./cli_test", 0x400000, "./cli_blocks.txt", "./corpus")
+	SpawnFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes")
 }
 
 func SetBP(pid int, address uintptr) []byte {
