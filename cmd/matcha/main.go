@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"matcha/internal/snapshot"
@@ -116,14 +117,14 @@ func NewState(path string, baseAddress uint64, snapshotAddress uint64, restoreAd
 
 func (s *State) Spawn(args []string) int {
 	path := s.Path
-	devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
+	//devNull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
 	cmd := exec.Command(path)
 	cmd.Args = []string{path}
 	cmd.Args = append(cmd.Args, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Stdout = devNull
-	cmd.Stderr = devNull
+	//cmd.Stdout = devNull
+	//cmd.Stderr = devNull
 	cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
 	err := cmd.Start()
 	if err != nil {
@@ -271,11 +272,12 @@ func (s *State) TakeSnapshot() {
 
 	DelBP(s.Pid, uintptr(pc), s.SnapshotAddressBytes)
 	SubRip(s.Pid)
-	// Set BreakPoints for the whole process now to get coverage
-	fmt.Println("Instrumenting Child")
-	s.InstrumentProcess(true)
 	s.SnapshotData = snapshot.NewSnapshot(s.Pid)
 	fmt.Println("Snapshot Complete")
+	// Set BreakPoints for the whole process now to get coverage
+	// You Instrument AFTER the snapshot and reinstrument on the restore
+	fmt.Println("Instrumenting Child")
+	s.InstrumentProcess(true)
 }
 
 func (s *State) RestoreLoop() bool {
@@ -310,11 +312,17 @@ func (s *State) RestoreLoop() bool {
 	}
 }
 
+func MutateCustom(data []byte) {
+	for i := range data {
+		data[i] = 0x42
+	}
+}
+
 func Mutate(data []byte) {
 	counter := 0
-	// Mutate 8% of the bytes
+	// Mutate 12% of the bytes
 	// ByteFlip Bit Flip And Random Insert
-	mutationsPerCycle := 8 * len(data) / 100
+	mutationsPerCycle := 12 * len(data) / 100
 	for {
 		randByte := rand.Intn((len(data))-0) + 0
 		randBitFlip := rand.Intn((7+1)-0) + 0
@@ -349,12 +357,15 @@ func findAllOccurrences(data []byte, search []byte, regionOffset uint64) []uint6
 	return results
 }
 
-func (s *State) FindEgg(egg []byte) []uint64 {
+func (s *State) FindEgg(egg []byte) ([]uint64, error) {
 	locations := make([]uint64, 0)
 	for _, mem := range s.SnapshotData.Memory {
 		locations = append(locations, findAllOccurrences(mem.RawData, egg, mem.Start)...)
 	}
-	return locations
+	if len(locations) == 0 {
+		return nil, errors.New("Failed to find egg")
+	}
+	return locations, nil
 }
 
 func (s *State) ReadBufferFromProcess(address uint64, buffer []byte) {
@@ -424,19 +435,27 @@ func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corp
 	fState.TakeSnapshot()
 	// We should be stopped at the restore address with the memory snapshotted
 	// Find Egg Now So we know where to overwrite it
-	addressesOfEgg := fState.FindEgg(egg)
+	addressesOfEgg, err := fState.FindEgg(egg)
+	if err != nil {
+		panic(err)
+	}
 	for {
 		nextCase := rand.Intn(len(fState.Corpus.CorpusBuffers))
 		copy(fState.CurrentFuzzCase, fState.Corpus.GetCaseByIdx(nextCase))
 		// Mutate Copy
+		//Mutate(fState.CurrentFuzzCase)
 		Mutate(fState.CurrentFuzzCase)
 		// Write To Process Memory
 		for _, address := range addressesOfEgg {
 			fState.WriteBufferToProcess(address, fState.CurrentFuzzCase)
 		}
+		//snapshot.MemoryDump(fState.Pid)
 		hitRestorePoint := fState.CoverageLoop()
 		if hitRestorePoint {
+			//fState.ContinueExec()
 			fState.RestoreSnapshot()
+			// Reinstrument the process with the remaining breakpoints
+			//fState.InstrumentProcess(fState.FuzzCases == 0)
 			fState.FuzzCases++
 		}
 		if fState.BreakPointsHit > fState.PreviousCoverageHit {
@@ -481,8 +500,10 @@ func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusD
 }
 
 func main() {
-	SpawnFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes")
+	//SpawnFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes")
 	//SnapShotFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes", 0x40B782, 0x402B0E)
+	// Attempting Server Example
+	SnapShotFuzzMode("./example/common_server_example", 0x400000, "./example/common_server_example_blocks.txt", "./corpus", "./crashes", 0x4013ef, 0x4012a9)
 }
 
 func SetBP(pid int, address uintptr) []byte {
