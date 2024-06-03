@@ -481,8 +481,8 @@ func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusD
 }
 
 func main() {
-	//SpawnFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes")
-	SnapShotFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes", 0x40B782, 0x402B0E)
+	SpawnFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes")
+	//SnapShotFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes", 0x40B782, 0x402B0E)
 }
 
 func SetBP(pid int, address uintptr) []byte {
