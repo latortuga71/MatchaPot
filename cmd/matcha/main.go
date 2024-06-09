@@ -39,6 +39,7 @@ type State struct {
 	CurrentFuzzCase      []byte
 	Corpus               Corpus
 	BreakPoints          map[uint64][]byte
+	DevNull              *os.File
 }
 
 func (c *Corpus) InitCorpus(corpusDir string, crashDir string) {
@@ -99,6 +100,10 @@ type Corpus struct {
 }
 
 func NewState(path string, baseAddress uint64, snapshotAddress uint64, restoreAddress uint64) *State {
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0755)
+	if err != nil {
+		panic(err)
+	}
 	state := &State{
 		Path:                path,
 		BreakPoints:         make(map[uint64][]byte),
@@ -106,6 +111,7 @@ func NewState(path string, baseAddress uint64, snapshotAddress uint64, restoreAd
 		PreviousCoverageHit: 0,
 		SnapshotAddress:     snapshotAddress,
 		RestoreAddress:      restoreAddress,
+		DevNull:             devNull,
 	}
 	state.BaseAddress = baseAddress
 	if state.BaseAddress == 0 {
@@ -121,10 +127,10 @@ func (s *State) Spawn(args []string) int {
 	cmd := exec.Command(path)
 	cmd.Args = []string{path}
 	cmd.Args = append(cmd.Args, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	//cmd.Stdout = devNull
-	//cmd.Stderr = devNull
+	//cmd.Stdout = os.Stdout
+	//cmd.Stderr = os.Stder
+	cmd.Stdout = s.DevNull
+	cmd.Stderr = s.DevNull
 	cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
 	err := cmd.Start()
 	if err != nil {
@@ -320,9 +326,9 @@ func MutateCustom(data []byte) {
 
 func Mutate(data []byte) {
 	counter := 0
-	// Mutate 12% of the bytes
+	// Mutate 5% of the bytes
 	// ByteFlip Bit Flip And Random Insert
-	mutationsPerCycle := 12 * len(data) / 100
+	mutationsPerCycle := 5 * len(data) / 100
 	for {
 		randByte := rand.Intn((len(data))-0) + 0
 		randBitFlip := rand.Intn((7+1)-0) + 0
@@ -468,7 +474,7 @@ func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corp
 }
 
 func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string, crashesDir string) {
-	rand.Seed(123)
+	rand.Seed(717171)
 	fState := NewState(target, baseAddress, 0x0, 0x0)
 	// init corpus
 	fState.Corpus.InitCorpus(corpusDir, crashesDir)
@@ -486,7 +492,7 @@ func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusD
 		// Write To payload tmp path
 		fState.Corpus.WriteFuzzCaseToDisk(payloadPath, fState.CurrentFuzzCase)
 		// spawn using that path
-		fState.Spawn([]string{payloadPath})
+		fState.Spawn([]string{payloadPath, "-o", "./out/output"})
 		fState.InstrumentProcess(fState.FuzzCases == 0)
 		fState.CoverageLoop()
 		if fState.BreakPointsHit > fState.PreviousCoverageHit {
@@ -500,10 +506,12 @@ func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusD
 }
 
 func main() {
+	SpawnFuzzMode("./jsonlint", 0x400000, "./libjson_blocks.txt", "./corpus", "./crashes")
+	//SpawnFuzzMode("./vpxdec", 0x400000, "./libvpx_blocks.txt", "./corpus", "./crashes")
 	//SpawnFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes")
 	//SnapShotFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes", 0x40B782, 0x402B0E)
 	// Attempting Server Example
-	SnapShotFuzzMode("./example/common_server_example", 0x400000, "./example/common_server_example_blocks.txt", "./corpus", "./crashes", 0x4013ef, 0x4012a9)
+	//SnapShotFuzzMode("./example/common_server_example", 0x400000, "./example/common_server_example_blocks.txt", "./corpus", "./crashes", 0x4013ef, 0x4012a9)
 }
 
 func SetBP(pid int, address uintptr) []byte {
