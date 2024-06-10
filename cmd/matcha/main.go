@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"matcha/internal/snapshot"
@@ -62,6 +63,7 @@ func (c *Corpus) InitCorpus(corpusDir string, crashDir string) {
 		c.CorpusBuffers = append(c.CorpusBuffers, content)
 		c.CorpusCount++
 	}
+	fmt.Printf("Loaded %d items into corpus\n", c.CorpusCount)
 }
 func (c *Corpus) GetCaseByIdx(idx int) []byte {
 	return c.CorpusBuffers[idx]
@@ -416,7 +418,6 @@ func ReadEggFromDisk(path string) []byte {
 }
 
 func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string, crashesDir string, snapshotAddress uint64, restoreAddress uint64) {
-	rand.Seed(123)
 	fState := NewState(target, baseAddress, snapshotAddress, restoreAddress)
 	// init corpus
 	fState.Corpus.InitCorpus(corpusDir, crashesDir)
@@ -472,13 +473,36 @@ func SnapShotFuzzMode(target string, baseAddress uint64, blocksFile string, corp
 	}
 
 }
+func GetBiggestCorpusItemSize(corpusDir string) int64 {
+	var err error
+	var biggest int64 = 0
+	entry, err := os.ReadDir(corpusDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, e := range entry {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			panic(err)
+		}
+		sz := info.Size()
+		if sz > biggest {
+			biggest = sz
+		}
+	}
+	return biggest
+}
 
 func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusDir string, crashesDir string) {
-	rand.Seed(717171)
 	fState := NewState(target, baseAddress, 0x0, 0x0)
 	// init corpus
 	fState.Corpus.InitCorpus(corpusDir, crashesDir)
-	fState.CurrentFuzzCase = make([]byte, len(fState.Corpus.CorpusBuffers[0]))
+	// get biggest size from corpus
+	fState.CurrentFuzzCase = make([]byte, GetBiggestCorpusItemSize(corpusDir))
+	//fState.CurrentFuzzCase = make([]byte, 0)
 	START_TIME = time.Now()
 	runtime.LockOSThread()
 	payloadPath := fmt.Sprintf("%s/tmp.bin", corpusDir)
@@ -492,7 +516,7 @@ func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusD
 		// Write To payload tmp path
 		fState.Corpus.WriteFuzzCaseToDisk(payloadPath, fState.CurrentFuzzCase)
 		// spawn using that path
-		fState.Spawn([]string{payloadPath, "-o", "./out/output"})
+		fState.Spawn([]string{payloadPath, "--tree"})
 		fState.InstrumentProcess(fState.FuzzCases == 0)
 		fState.CoverageLoop()
 		if fState.BreakPointsHit > fState.PreviousCoverageHit {
@@ -506,6 +530,13 @@ func SpawnFuzzMode(target string, baseAddress uint64, blocksFile string, corpusD
 }
 
 func main() {
+	seedPtr := flag.Int64("seed", 0, "seed value")
+	flag.Parse()
+	if *seedPtr == 0 {
+		flag.PrintDefaults()
+		return
+	}
+	rand.Seed(*seedPtr)
 	SpawnFuzzMode("./jsonlint", 0x400000, "./libjson_blocks.txt", "./corpus", "./crashes")
 	//SpawnFuzzMode("./vpxdec", 0x400000, "./libvpx_blocks.txt", "./corpus", "./crashes")
 	//SpawnFuzzMode("./exif", 0x400000, "./exif_blocks.txt", "./corpus", "./crashes")
